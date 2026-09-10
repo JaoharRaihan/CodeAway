@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose'
+// @ts-ignore
 import bcrypt from 'bcrypt'
 
 export interface IUser extends Document {
