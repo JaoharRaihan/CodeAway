@@ -22,6 +22,7 @@ const TaskEventSchema = new Schema<ITaskEvent>({
       'approval_required',
       'error',
       'task_completed',
+      'user_message',
     ],
     required: true,
   },

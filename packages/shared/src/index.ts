@@ -17,6 +17,7 @@ export type EventType =
   | 'approval_required'
   | 'error'
   | 'task_completed'
+  | 'user_message'
 
 // ─── Approval ────────────────────────────────────────────────────────────────
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
@@ -91,6 +92,12 @@ export interface ServerToAgentEvents {
     taskId: string
     projectId: string
     prompt: string
+    userId: string
+  }) => void
+  'task:followup': (payload: {
+    taskId: string
+    projectId: string
+    message: string
     userId: string
   }) => void
   'approval:response': (payload: ApprovalResponsePayload) => void

@@ -99,6 +99,56 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
 
     return task
   })
+
+  // POST /tasks/:id/messages — send follow-up message to task
+  fastify.post('/:id/messages', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const { message } = z.object({ message: z.string().min(1).max(4000) }).parse(request.body)
+
+    const task = await Task.findOne({ _id: id, user_id: request.user.userId })
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
+
+    // Record user message in event history
+    const taskEvent = await TaskEvent.create({
+      task_id: task._id,
+      event_type: 'user_message',
+      message,
+      metadata: { sender: 'user' },
+    })
+
+    // Set task back to running
+    task.status = 'running'
+    await task.save()
+
+    // Notify connected mobile clients
+    try {
+      const io = getIO()
+      io.to(`user:${request.user.userId}`).emit('task:event', {
+        taskId: task.id as string,
+        event: {
+          type: 'user_message',
+          message,
+          metadata: { sender: 'user' },
+        },
+      })
+      io.to(`user:${request.user.userId}`).emit('task:status_changed', {
+        taskId: task.id as string,
+        status: 'running',
+      })
+
+      // Push follow-up instruction to the laptop agent
+      io.to(`device:${task.device_id}`).emit('task:followup', {
+        taskId: task.id as string,
+        projectId: task.project_id.toString(),
+        message,
+        userId: request.user.userId,
+      })
+    } catch {
+      // Agent or socket may be offline
+    }
+
+    return reply.status(200).send({ ok: true, event: taskEvent })
+  })
 }
 
 export default taskRoutes

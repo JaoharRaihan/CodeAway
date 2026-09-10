@@ -8,7 +8,7 @@ import { api } from '../core/api'
 import { getConfig, saveConfig, isAuthenticated } from '../core/config'
 import { WorkspaceManager } from '../core/workspace'
 import { GitManager } from '../core/git'
-import { runAgentLoop } from '../ai/runner'
+import { createTaskSession, runSessionTurn, type TaskSession } from '../ai/runner'
 import type { ServerToAgentEvents, AgentToServerEvents } from '@codeaway/shared'
 
 // pending approval resolvers — keyed by approvalId
@@ -101,17 +101,16 @@ export async function connectCommand(opts: { workspace?: string }) {
     console.log(chalk.yellow('\n⚠️  Disconnected — reconnecting...'))
   })
 
-  // ── 6. Handle incoming tasks ────────────────────────────────────────────────
-  socket.on('task:new', async ({ taskId, projectId, prompt, userId }) => {
-    console.log(chalk.bold.cyan(`\n📨 New task received: ${taskId}`))
-    console.log(chalk.dim(`   ${prompt.slice(0, 120)}...`))
+  // Active task conversation sessions
+  const taskSessions = new Map<string, TaskSession>()
 
+  const executeTurn = async (session: TaskSession, message: string, isFollowUp: boolean) => {
+    const { taskId, userId } = session
     const emit = (event: any) => {
       socket.emit('task:event:emit', { taskId, userId, event })
     }
 
     const onApprovalNeeded = async (command: string, reason: string): Promise<boolean> => {
-      // Create approval record in backend
       const res = await api.post('/approvals', { task_id: taskId, command, reason })
       const approvalId = res.data._id
 
@@ -132,16 +131,13 @@ export async function connectCommand(opts: { workspace?: string }) {
     }
 
     try {
-      const result = await runAgentLoop({
-        taskId,
-        userId,
-        prompt,
-        workspace,
-        git,
-        geminiApiKey: geminiApiKey!,
-        onEvent: emit,
-        onApprovalNeeded,
-      })
+      const result = await runSessionTurn(
+        session,
+        message,
+        isFollowUp,
+        emit,
+        onApprovalNeeded
+      )
 
       socket.emit('task:complete', {
         taskId,
@@ -157,6 +153,55 @@ export async function connectCommand(opts: { workspace?: string }) {
         result: `Failed: ${err.message}`,
         files: [],
       })
+    } finally {
+      // Process next queued follow-up if any
+      if (session.followUpQueue.length > 0) {
+        const nextMessage = session.followUpQueue.shift()!
+        executeTurn(session, nextMessage, true)
+      }
+    }
+  }
+
+  // ── 6. Handle incoming tasks ────────────────────────────────────────────────
+  socket.on('task:new', async ({ taskId, projectId, prompt, userId }) => {
+    if (taskId === 'CANCELLED') return
+    console.log(chalk.bold.cyan(`\n📨 New task received: ${taskId}`))
+    console.log(chalk.dim(`   ${prompt.slice(0, 120)}...`))
+
+    const session = createTaskSession({
+      taskId,
+      userId,
+      workspace,
+      git,
+      geminiApiKey: geminiApiKey!,
+    })
+    taskSessions.set(taskId, session)
+    await executeTurn(session, prompt, false)
+  })
+
+  // ── 6b. Handle follow-up messages on the same task ──────────────────────────
+  socket.on('task:followup', async ({ taskId, projectId, message, userId }) => {
+    console.log(chalk.bold.cyan(`\n📨 Follow-up received for task ${taskId}:`))
+    console.log(chalk.white(`   ${message}`))
+
+    let session = taskSessions.get(taskId)
+    if (!session) {
+      // Session wasn't in memory (e.g. agent reconnected) — initialize one
+      session = createTaskSession({
+        taskId,
+        userId,
+        workspace,
+        git,
+        geminiApiKey: geminiApiKey!,
+      })
+      taskSessions.set(taskId, session)
+    }
+
+    if (session.isRunning) {
+      console.log(chalk.yellow(`   Agent is currently busy; queueing follow-up...`))
+      session.followUpQueue.push(message)
+    } else {
+      await executeTurn(session, message, true)
     }
   })
 
