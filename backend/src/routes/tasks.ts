@@ -9,6 +9,7 @@ const createTaskSchema = z.object({
   device_id: z.string().min(1),
   project_id: z.string().min(1),
   prompt: z.string().min(1).max(4000),
+  model: z.string().optional(),
 })
 
 const taskRoutes: FastifyPluginAsync = async (fastify) => {
@@ -21,6 +22,7 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
       device_id: body.device_id,
       project_id: body.project_id,
       prompt: body.prompt,
+      ai_model: body.model || 'gemini-3.5-flash-lite',
       status: 'queued',
     })
 
@@ -32,6 +34,7 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
         projectId: body.project_id,
         prompt: body.prompt,
         userId: request.user.userId,
+        model: task.ai_model,
       })
     } catch {
       // Agent may be offline — task stays queued
@@ -142,6 +145,7 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
         projectId: task.project_id.toString(),
         message,
         userId: request.user.userId,
+        model: task.ai_model,
       })
     } catch {
       // Agent or socket may be offline

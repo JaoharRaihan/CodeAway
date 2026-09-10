@@ -20,8 +20,15 @@ export default function NewTaskScreen({ navigation, route }: Props) {
   const [projects, setProjects] = useState<any[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string>(route.params?.deviceId ?? '')
   const [selectedProject, setSelectedProject] = useState<string>('')
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash-lite')
   const [prompt, setPrompt] = useState('')
   const [loading, setLoading] = useState(false)
+
+  const AI_MODELS = [
+    { id: 'gemini-3.5-flash-lite', label: '⚡ Gemini 3.5 Flash' },
+    { id: 'claude-3-7-sonnet-20250219', label: '🧠 Claude 3.7 Sonnet' },
+    { id: 'gpt-4o', label: '🌐 GPT-4o' },
+  ]
 
   useEffect(() => {
     api.get('/devices').then((r) => {
@@ -49,6 +56,7 @@ export default function NewTaskScreen({ navigation, route }: Props) {
         device_id: selectedDevice,
         project_id: selectedProject,
         prompt: prompt.trim(),
+        model: selectedModel,
       })
       addTask(res.data)
       navigation.replace('TaskDetail', { taskId: res.data._id })
@@ -97,6 +105,22 @@ export default function NewTaskScreen({ navigation, route }: Props) {
           {projects.length === 0 && (
             <Text style={styles.noProject}>No projects — run `codeaway connect` first</Text>
           )}
+        </ScrollView>
+
+        {/* AI Model picker */}
+        <Text style={styles.label}>AI Agent Model</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
+          {AI_MODELS.map((m) => (
+            <TouchableOpacity
+              key={m.id}
+              style={[styles.chip, selectedModel === m.id && styles.chipActive]}
+              onPress={() => setSelectedModel(m.id)}
+            >
+              <Text style={[styles.chipText, selectedModel === m.id && styles.chipTextActive]}>
+                {m.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </ScrollView>
 
         {/* Prompt */}

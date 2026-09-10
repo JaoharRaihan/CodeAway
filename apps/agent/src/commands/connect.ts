@@ -156,16 +156,20 @@ export async function connectCommand(opts: { workspace?: string }) {
     } finally {
       // Process next queued follow-up if any
       if (session.followUpQueue.length > 0) {
-        const nextMessage = session.followUpQueue.shift()!
-        executeTurn(session, nextMessage, true)
+        const next = session.followUpQueue.shift()!
+        if (next.model) session.model = next.model
+        executeTurn(session, next.message, true)
       }
     }
   }
 
+  const anthropicApiKey = config.anthropicApiKey || process.env.ANTHROPIC_API_KEY
+  const openaiApiKey = config.openaiApiKey || process.env.OPENAI_API_KEY
+
   // ── 6. Handle incoming tasks ────────────────────────────────────────────────
-  socket.on('task:new', async ({ taskId, projectId, prompt, userId }) => {
+  socket.on('task:new', async ({ taskId, projectId, prompt, userId, model }) => {
     if (taskId === 'CANCELLED') return
-    console.log(chalk.bold.cyan(`\n📨 New task received: ${taskId}`))
+    console.log(chalk.bold.cyan(`\n📨 New task received: ${taskId} [${model || 'gemini-3.5-flash'}]`))
     console.log(chalk.dim(`   ${prompt.slice(0, 120)}...`))
 
     const session = createTaskSession({
@@ -174,13 +178,16 @@ export async function connectCommand(opts: { workspace?: string }) {
       workspace,
       git,
       geminiApiKey: geminiApiKey!,
+      anthropicApiKey,
+      openaiApiKey,
+      model,
     })
     taskSessions.set(taskId, session)
     await executeTurn(session, prompt, false)
   })
 
   // ── 6b. Handle follow-up messages on the same task ──────────────────────────
-  socket.on('task:followup', async ({ taskId, projectId, message, userId }) => {
+  socket.on('task:followup', async ({ taskId, projectId, message, userId, model }) => {
     console.log(chalk.bold.cyan(`\n📨 Follow-up received for task ${taskId}:`))
     console.log(chalk.white(`   ${message}`))
 
@@ -193,13 +200,18 @@ export async function connectCommand(opts: { workspace?: string }) {
         workspace,
         git,
         geminiApiKey: geminiApiKey!,
+        anthropicApiKey,
+        openaiApiKey,
+        model,
       })
       taskSessions.set(taskId, session)
     }
 
+    if (model) session.model = model
+
     if (session.isRunning) {
       console.log(chalk.yellow(`   Agent is currently busy; queueing follow-up...`))
-      session.followUpQueue.push(message)
+      session.followUpQueue.push({ message, model })
     } else {
       await executeTurn(session, message, true)
     }

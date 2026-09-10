@@ -93,12 +93,14 @@ export interface ServerToAgentEvents {
     projectId: string
     prompt: string
     userId: string
+    model?: string
   }) => void
   'task:followup': (payload: {
     taskId: string
     projectId: string
     message: string
     userId: string
+    model?: string
   }) => void
   'approval:response': (payload: ApprovalResponsePayload) => void
 }

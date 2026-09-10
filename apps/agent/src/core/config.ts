@@ -11,6 +11,9 @@ export interface AgentConfig {
   apiUrl: string
   workspace: string
   geminiApiKey: string
+  anthropicApiKey?: string
+  openaiApiKey?: string
+  defaultModel?: string
 }
 
 // Stored at ~/.codeaway/config.json

@@ -6,6 +6,7 @@ export interface ITask extends Document {
   device_id: Types.ObjectId
   project_id: Types.ObjectId
   prompt: string
+  ai_model?: string
   status: TaskStatus
   started_at?: Date
   completed_at?: Date
@@ -19,6 +20,7 @@ const TaskSchema = new Schema<ITask>({
   device_id: { type: Schema.Types.ObjectId, ref: 'Device', required: true },
   project_id: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
   prompt: { type: String, required: true },
+  ai_model: { type: String, default: 'gemini-3.5-flash-lite' },
   status: {
     type: String,
     enum: ['queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled'],

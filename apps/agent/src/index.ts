@@ -4,6 +4,8 @@ import { loginCommand } from './commands/login'
 import { registerCommand } from './commands/register'
 import { connectCommand } from './commands/connect'
 import { statusCommand } from './commands/status'
+import { daemonCommand } from './commands/daemon'
+import { keyCommand } from './commands/key'
 
 program
   .name('codeaway')
@@ -30,5 +32,17 @@ program
   .command('status')
   .description('Show current connection and config status')
   .action(statusCommand)
+
+program
+  .command('daemon <action>')
+  .description('Manage Mac background service (install, uninstall, start, stop, status, logs)')
+  .option('-w, --workspace <path>', 'Workspace directory to monitor')
+  .option('-n, --lines <number>', 'Number of log lines to show (default 30)')
+  .action(daemonCommand)
+
+program
+  .command('key <action> [provider] [key]')
+  .description('Manage AI provider keys (set, list)')
+  .action(keyCommand)
 
 program.parse()
