@@ -110,18 +110,47 @@ export default function NewTaskScreen({ navigation, route }: Props) {
         {/* AI Model picker */}
         <Text style={styles.label}>AI Agent Model</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
-          {AI_MODELS.map((m) => (
-            <TouchableOpacity
-              key={m.id}
-              style={[styles.chip, selectedModel === m.id && styles.chipActive]}
-              onPress={() => setSelectedModel(m.id)}
-            >
-              <Text style={[styles.chipText, selectedModel === m.id && styles.chipTextActive]}>
-                {m.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
+          {AI_MODELS.map((m) => {
+            const currentDev = devices.find((d) => d._id === selectedDevice)
+            const reported = currentDev?.available_models?.find((devModel: any) => devModel.id === m.id)
+            const isMissingKey = reported?.status === 'api_key_required'
+            const isSelected = selectedModel === m.id
+
+            return (
+              <TouchableOpacity
+                key={m.id}
+                style={[
+                  styles.chip,
+                  isSelected && styles.chipActive,
+                  isMissingKey && !isSelected && styles.chipMissingKey,
+                ]}
+                onPress={() => setSelectedModel(m.id)}
+              >
+                <Text style={[styles.chipText, isSelected && styles.chipTextActive]}>
+                  {m.label} {isMissingKey ? '⚠️' : '✓'}
+                </Text>
+              </TouchableOpacity>
+            )
+          })}
         </ScrollView>
+
+        {(() => {
+          const currentDev = devices.find((d) => d._id === selectedDevice)
+          const reported = currentDev?.available_models?.find((devModel: any) => devModel.id === selectedModel)
+          if (reported?.status === 'api_key_required') {
+            const providerName = reported.provider || 'that provider'
+            return (
+              <View style={styles.modelWarningBox}>
+                <Text style={styles.modelWarningText}>
+                  ⚠️ API key for {reported.name} is not set on your Mac. Run{' '}
+                  <Text style={styles.modelWarningCode}>codeaway key set {providerName} &lt;key&gt;</Text> on your Mac,
+                  or CodeAway will automatically fall back to Gemini 3.5 Flash.
+                </Text>
+              </View>
+            )
+          }
+          return null
+        })()}
 
         {/* Prompt */}
         <Text style={styles.label}>What should I build?</Text>
@@ -162,8 +191,28 @@ const styles = (StyleSheet as any).create({
     marginRight: 8, borderWidth: 1, borderColor: '#2a2a3a',
   },
   chipActive: { backgroundColor: '#6c63ff', borderColor: '#6c63ff' },
+  chipMissingKey: { borderColor: '#524018', backgroundColor: '#18140e' },
   chipText: { color: '#888', fontSize: 13, fontWeight: '500' },
   chipTextActive: { color: '#fff' },
+  modelWarningBox: {
+    backgroundColor: '#261b07',
+    borderWidth: 1,
+    borderColor: '#784e10',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  modelWarningText: {
+    color: '#fbbf24',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  modelWarningCode: {
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    color: '#fef08a',
+  },
   noProject: { color: '#444', fontSize: 13, paddingVertical: 10 },
   promptInput: {
     backgroundColor: '#16161e', borderRadius: 14, padding: 16,

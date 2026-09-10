@@ -83,7 +83,7 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.patch('/:id/cancel', { onRequest: [fastify.authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string }
     const task = await Task.findOneAndUpdate(
-      { _id: id, user_id: request.user.userId, status: { $in: ['queued', 'running', 'waiting_approval'] } },
+      { _id: id, user_id: request.user.userId, status: { $in: ['queued', 'running', 'waiting_approval', 'testing'] } },
       { status: 'cancelled' },
       { new: true }
     )
@@ -92,15 +92,56 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
     // Notify agent to abort
     try {
       const io = getIO()
-      io.to(`device:${task.device_id}`).emit('task:new', {
-        taskId: 'CANCELLED',
-        projectId: '',
-        prompt: '',
-        userId: request.user.userId,
+      io.to(`device:${task.device_id}`).emit('task:abort', {
+        taskId: task.id as string,
+      })
+      io.to(`user:${request.user.userId}`).emit('task:status_changed', {
+        taskId: task.id as string,
+        status: 'cancelled',
       })
     } catch { /* agent offline */ }
 
     return task
+  })
+
+  // POST /tasks/:id/emergency-stop
+  fastify.post('/:id/emergency-stop', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const task = await Task.findOneAndUpdate(
+      { _id: id, user_id: request.user.userId, status: { $in: ['queued', 'running', 'waiting_approval', 'testing'] } },
+      { status: 'cancelled' },
+      { new: true }
+    )
+    if (!task) return reply.status(404).send({ error: 'Task not found or not in a cancellable state' })
+
+    // Log the abort event
+    await TaskEvent.create({
+      task_id: task._id,
+      event_type: 'error',
+      message: '🛑 Emergency stop triggered: active command killed and agent halted.',
+    })
+
+    try {
+      const io = getIO()
+      // Send abort to agent daemon on Mac
+      io.to(`device:${task.device_id}`).emit('task:abort', {
+        taskId: task.id as string,
+      })
+      // Broadcast to phone
+      io.to(`user:${request.user.userId}`).emit('task:status_changed', {
+        taskId: task.id as string,
+        status: 'cancelled',
+      })
+      io.to(`user:${request.user.userId}`).emit('task:event', {
+        taskId: task.id as string,
+        event: {
+          type: 'error',
+          message: '🛑 Emergency stop triggered: active command killed and agent halted.',
+        },
+      })
+    } catch { /* agent offline */ }
+
+    return reply.status(200).send({ ok: true, task })
   })
 
   // POST /tasks/:id/messages — send follow-up message to task

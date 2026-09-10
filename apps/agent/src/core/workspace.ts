@@ -1,6 +1,15 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
+export interface ProjectContext {
+  framework: string
+  packageManager: 'npm' | 'yarn' | 'pnpm' | 'bun' | 'unknown'
+  language: string
+  scripts: Record<string, string>
+  keyDirectories: string[]
+  hasGit: boolean
+}
+
 export class WorkspaceManager {
   private allowedRoot: string
 
@@ -8,23 +17,46 @@ export class WorkspaceManager {
     this.allowedRoot = path.resolve(workspacePath)
   }
 
-  /** Resolve and validate that a path is inside the allowed workspace */
+  /**
+   * Resolve and validate that a path is strictly inside the allowed workspace.
+   * Prevents path traversal vulnerabilities and prefix collisions.
+   */
   resolveSafe(filePath: string): string {
     const resolved = path.resolve(this.allowedRoot, filePath)
-    if (!resolved.startsWith(this.allowedRoot)) {
-      throw new Error(`🚫 Path "${filePath}" is outside the allowed workspace`)
+    const rel = path.relative(this.allowedRoot, resolved)
+
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new Error(`🚫 Path "${filePath}" is outside the authorized workspace: ${this.allowedRoot}`)
     }
+
+    if (this.isSensitive(filePath) || this.isSensitive(resolved)) {
+      throw new Error(`🚫 Access to sensitive credential or system file "${filePath}" is blocked`)
+    }
+
     return resolved
   }
 
-  /** List files recursively (respects .gitignore patterns) */
+  private isSensitive(p: string): boolean {
+    const base = path.basename(p).toLowerCase()
+    if (base === '.env' || base.startsWith('.env.') || base === 'id_rsa' || base === 'id_ed25519') return true
+    if (p.includes('/.ssh/') || p.includes('/.aws/') || p.includes('/.git/config') || p.includes('/.gnupg/')) return true
+    return false
+  }
+
+  /** List files recursively (respects common ignore patterns) */
   listFiles(subDir = '', maxDepth = 4): string[] {
     const base = this.resolveSafe(subDir)
     const results: string[] = []
 
     const walk = (dir: string, depth: number) => {
       if (depth > maxDepth) return
-      const entries = fs.readdirSync(dir, { withFileTypes: true })
+      let entries: fs.Dirent[] = []
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true })
+      } catch {
+        return
+      }
+
       for (const entry of entries) {
         if (this.shouldSkip(entry.name)) continue
         const fullPath = path.join(dir, entry.name)
@@ -52,6 +84,108 @@ export class WorkspaceManager {
     fs.writeFileSync(safe, content, 'utf-8')
   }
 
+  /**
+   * Surgical edit replacing a specific text target inside a file.
+   */
+  editFile(filePath: string, targetContent: string, replacementContent: string): void {
+    const safe = this.resolveSafe(filePath)
+    const existing = fs.readFileSync(safe, 'utf-8')
+    if (!existing.includes(targetContent)) {
+      throw new Error(`Target content not found in ${filePath}`)
+    }
+    const updated = existing.replace(targetContent, replacementContent)
+    fs.writeFileSync(safe, updated, 'utf-8')
+  }
+
+  deleteFile(filePath: string): boolean {
+    const safe = this.resolveSafe(filePath)
+    if (fs.existsSync(safe)) {
+      fs.unlinkSync(safe)
+      return true
+    }
+    return false
+  }
+
+  searchCode(query: string, subDir = '', maxResults = 25): Array<{ file: string; line: number; text: string }> {
+    const files = this.listFiles(subDir, 5)
+    const results: Array<{ file: string; line: number; text: string }> = []
+    const isReg = query.startsWith('/') && query.endsWith('/') && query.length > 2
+    let regex: RegExp
+
+    try {
+      regex = isReg ? new RegExp(query.slice(1, -1), 'i') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+    } catch {
+      regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+    }
+
+    for (const relPath of files) {
+      if (results.length >= maxResults) break
+      try {
+        const full = path.join(this.allowedRoot, relPath)
+        const stat = fs.statSync(full)
+        if (stat.size > 1024 * 512) continue // skip files > 512KB
+
+        const content = fs.readFileSync(full, 'utf-8')
+        const lines = content.split('\n')
+        for (let i = 0; i < lines.length; i++) {
+          if (regex.test(lines[i])) {
+            results.push({ file: relPath, line: i + 1, text: lines[i].trim() })
+            if (results.length >= maxResults) break
+          }
+        }
+      } catch {
+        /* skip binary or unreadable files */
+      }
+    }
+
+    return results
+  }
+
+  getProjectContext(): ProjectContext {
+    let framework = 'Node.js / General'
+    let language = 'JavaScript'
+    let packageManager: ProjectContext['packageManager'] = 'npm'
+    let scripts: Record<string, string> = {}
+    const keyDirectories: string[] = []
+
+    if (fs.existsSync(path.join(this.allowedRoot, 'package.json'))) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(this.allowedRoot, 'package.json'), 'utf-8'))
+        scripts = pkg.scripts || {}
+        const allDeps = { ...pkg.dependencies, ...pkg.devDependencies }
+
+        if (allDeps['react-native']) framework = 'React Native'
+        else if (allDeps['next']) framework = 'Next.js'
+        else if (allDeps['vite']) framework = 'Vite'
+        else if (allDeps['express'] || allDeps['fastify']) framework = 'Node.js Backend'
+
+        if (fs.existsSync(path.join(this.allowedRoot, 'tsconfig.json')) || allDeps['typescript']) {
+          language = 'TypeScript'
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (fs.existsSync(path.join(this.allowedRoot, 'yarn.lock'))) packageManager = 'yarn'
+    else if (fs.existsSync(path.join(this.allowedRoot, 'pnpm-lock.yaml'))) packageManager = 'pnpm'
+    else if (fs.existsSync(path.join(this.allowedRoot, 'bun.lockb'))) packageManager = 'bun'
+
+    const checkDirs = ['src', 'apps', 'packages', 'android', 'ios', 'lib', 'test', '__tests__']
+    for (const d of checkDirs) {
+      if (fs.existsSync(path.join(this.allowedRoot, d))) keyDirectories.push(d)
+    }
+
+    const hasGit = fs.existsSync(path.join(this.allowedRoot, '.git'))
+
+    return {
+      framework,
+      packageManager,
+      language,
+      scripts,
+      keyDirectories,
+      hasGit,
+    }
+  }
+
   fileExists(filePath: string): boolean {
     try {
       return fs.existsSync(this.resolveSafe(filePath))
@@ -68,7 +202,8 @@ export class WorkspaceManager {
     const SKIP = [
       'node_modules', '.git', 'dist', 'build', '.next',
       '__pycache__', '.DS_Store', 'coverage', '.cache',
+      'Pods', '.gradle',
     ]
-    return SKIP.includes(name) || name.startsWith('.')
+    return SKIP.includes(name) || (name.startsWith('.') && name !== '.github')
   }
 }

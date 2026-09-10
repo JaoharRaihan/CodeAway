@@ -13,6 +13,7 @@
     "build:backend": "npm run build --workspace=backend",
     "build:shared": "npm run build --workspace=packages/shared",
     "build": "npm run build:shared && npm run build:backend",
+    "test": "npm run test --workspace=apps/agent",
     "start": "node backend/dist/server.js"
   },
   "engines": {

@@ -8,7 +8,8 @@ import { api } from '../core/api'
 import { getConfig, saveConfig, isAuthenticated } from '../core/config'
 import { WorkspaceManager } from '../core/workspace'
 import { GitManager } from '../core/git'
-import { createTaskSession, runSessionTurn, type TaskSession } from '../ai/runner'
+import { createTaskSession, runSessionTurn, abortTaskSession, type TaskSession } from '../ai/runner'
+import { providerRegistry } from '../ai/providers/registry'
 import type { ServerToAgentEvents, AgentToServerEvents } from '@codeaway/shared'
 
 // pending approval resolvers — keyed by approvalId
@@ -94,7 +95,13 @@ export async function connectCommand(opts: { workspace?: string }) {
     console.log(chalk.dim(`   Device    : ${os.hostname()} (${deviceId})`))
     console.log(chalk.cyan('\n⏳ Waiting for tasks from your phone...\n'))
 
-    socket.emit('agent:connect', { deviceId: deviceId!, token: config.token! })
+    socket.emit('agent:connect', {
+      deviceId: deviceId!,
+      token: config.token!,
+      availableModels: providerRegistry.getAvailableModels(),
+      currentProject: path.basename(workspacePath),
+      version: '0.1.0',
+    })
   })
 
   socket.on('disconnect', () => {
@@ -231,12 +238,28 @@ export async function connectCommand(opts: { workspace?: string }) {
     }
   })
 
-  // ── 8. Heartbeat ────────────────────────────────────────────────────────────
+  // ── 8. Emergency Stop (Task Abort) ──────────────────────────────────────────
+  socket.on('task:abort', ({ taskId }) => {
+    console.log(chalk.red.bold(`\n🛑 Emergency Stop received for task ${taskId}`))
+    const session = taskSessions.get(taskId)
+    if (session) {
+      abortTaskSession(session)
+      console.log(chalk.red(`   Task ${taskId} execution aborted and child processes terminated.`))
+    }
+  })
+
+  // ── 9. Heartbeat ────────────────────────────────────────────────────────────
   setInterval(() => {
-    socket.emit('agent:heartbeat', { deviceId: deviceId! })
+    socket.emit('agent:heartbeat', {
+      deviceId: deviceId!,
+      availableModels: providerRegistry.getAvailableModels(),
+      currentProject: path.basename(workspacePath),
+      version: '0.1.0',
+    })
   }, 30_000)
 
   socket.on('connect_error', (err) => {
     console.error(chalk.red(`Connection error: ${err.message}`))
   })
 }
+

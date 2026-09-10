@@ -115,6 +115,32 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
     navigation.goBack()
   }
 
+  const handleEmergencyStop = () => {
+    Alert.alert(
+      'Emergency Stop',
+      'Immediately terminate any running command on your Mac and stop this task?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: '🛑 Stop Now',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await api.post(`/tasks/${taskId}/emergency-stop`)
+              updateTaskStatus(taskId, 'cancelled')
+              addLiveEvent(taskId, {
+                type: 'error',
+                message: '🛑 Emergency stop triggered: active command killed and agent halted.',
+              })
+            } catch (err: any) {
+              Alert.alert('Error', err.response?.data?.error ?? err.message)
+            }
+          },
+        },
+      ]
+    )
+  }
+
   const handleSendFollowUp = async () => {
     const trimmed = followUpText.trim()
     if (!trimmed || sending) return
@@ -139,7 +165,7 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
   }
 
   const terminalEvents = events.filter((e) =>
-    ['command_started', 'command_finished', 'error'].includes(e.event.type)
+    ['command_started', 'command_output', 'command_finished', 'error'].includes(e.event.type)
   )
 
   const modelName = (task as any)?.ai_model || (task as any)?.model || 'Gemini 3.5 Flash'
@@ -169,7 +195,12 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
               <Text style={styles.modelPillText}>{modelBadgeText}</Text>
             </View>
           </View>
-          {(task?.status === 'running' || task?.status === 'queued') && (
+          {['running', 'waiting_approval', 'testing'].includes(task?.status ?? '') && (
+            <TouchableOpacity onPress={handleEmergencyStop} style={styles.emergencyBtn}>
+              <Text style={styles.emergencyText}>🛑 Stop</Text>
+            </TouchableOpacity>
+          )}
+          {task?.status === 'queued' && (
             <TouchableOpacity onPress={cancelTask} style={styles.cancelBtn}>
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
@@ -422,6 +453,15 @@ const styles = (StyleSheet as any).create({
     paddingVertical: 6,
   },
   cancelText: { color: '#f87171', fontSize: 13, fontWeight: '600' },
+  emergencyBtn: {
+    backgroundColor: '#3b1016',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#7f1d1d',
+  },
+  emergencyText: { color: '#f87171', fontSize: 12, fontWeight: '700' },
 
   tabBar: {
     flexDirection: 'row',

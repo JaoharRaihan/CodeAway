@@ -29,19 +29,31 @@ export function initSocket(httpServer: any): Server {
     })
 
     // ── Laptop agent registers itself ─────────────────────────────────────
-    socket.on('agent:connect', async ({ deviceId }) => {
+    socket.on('agent:connect', async (payload: any) => {
+      const { deviceId, availableModels, currentProject, version } = payload
       socket.join(`device:${deviceId}`)
-      await Device.findByIdAndUpdate(deviceId, {
+      const update: Record<string, unknown> = {
         status: 'online',
         socket_id: socket.id,
         last_seen_at: new Date(),
-      })
-      console.log(`💻 Agent connected — device: ${deviceId}`)
+      }
+      if (availableModels) update.available_models = availableModels
+      if (currentProject) update.current_project = currentProject
+      if (version) update.agent_version = version
+
+      await Device.findByIdAndUpdate(deviceId, update)
+      console.log(`💻 Agent connected — device: ${deviceId} (${currentProject || 'no project'})`)
     })
 
     // ── Heartbeat ─────────────────────────────────────────────────────────
-    socket.on('agent:heartbeat', async ({ deviceId }) => {
-      await Device.findByIdAndUpdate(deviceId, { last_seen_at: new Date() })
+    socket.on('agent:heartbeat', async (payload: any) => {
+      const { deviceId, availableModels, currentProject, version } = payload
+      const update: Record<string, unknown> = { last_seen_at: new Date() }
+      if (availableModels) update.available_models = availableModels
+      if (currentProject) update.current_project = currentProject
+      if (version) update.agent_version = version
+
+      await Device.findByIdAndUpdate(deviceId, update)
     })
 
     // ── AI progress event from agent → forward to phone ───────────────────

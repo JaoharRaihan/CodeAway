@@ -3,6 +3,7 @@ export type TaskStatus =
   | 'queued'
   | 'running'
   | 'waiting_approval'
+  | 'testing'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -10,14 +11,26 @@ export type TaskStatus =
 // ─── Events ──────────────────────────────────────────────────────────────────
 export type EventType =
   | 'task_started'
+  | 'agent_thinking'
   | 'file_read'
   | 'file_modified'
+  | 'file_deleted'
   | 'command_started'
+  | 'command_output'
   | 'command_finished'
   | 'approval_required'
   | 'error'
   | 'task_completed'
   | 'user_message'
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+export interface ModelInfo {
+  id: string
+  name: string
+  provider: 'gemini' | 'anthropic' | 'openai'
+  status: 'available' | 'api_key_required' | 'unavailable'
+  isDefault?: boolean
+}
 
 // ─── Approval ────────────────────────────────────────────────────────────────
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
@@ -75,8 +88,19 @@ export interface ClientToServerEvents {
 
 /** Events the laptop agent sends to server */
 export interface AgentToServerEvents {
-  'agent:connect': (payload: { deviceId: string; token: string }) => void
-  'agent:heartbeat': (payload: { deviceId: string }) => void
+  'agent:connect': (payload: {
+    deviceId: string
+    token: string
+    availableModels?: ModelInfo[]
+    currentProject?: string
+    version?: string
+  }) => void
+  'agent:heartbeat': (payload: {
+    deviceId: string
+    availableModels?: ModelInfo[]
+    currentProject?: string
+    version?: string
+  }) => void
   'task:event:emit': (payload: {
     taskId: string
     userId: string
@@ -101,6 +125,9 @@ export interface ServerToAgentEvents {
     message: string
     userId: string
     model?: string
+  }) => void
+  'task:abort': (payload: {
+    taskId: string
   }) => void
   'approval:response': (payload: ApprovalResponsePayload) => void
 }
