@@ -17,6 +17,38 @@ const approvalRoutes: FastifyPluginAsync = async (fastify) => {
     return Approval.find(filter).sort({ created_at: -1 })
   })
 
+  // POST /approvals — laptop agent creates an approval request
+  fastify.post('/', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const { task_id, command, reason } = request.body as {
+      task_id: string
+      command: string
+      reason: string
+    }
+
+    const approval = await Approval.create({
+      task_id,
+      command,
+      reason,
+      status: 'pending',
+    })
+
+    const task = await Task.findById(task_id)
+    if (task) {
+      await Task.findByIdAndUpdate(task.id, { status: 'waiting_approval' })
+      try {
+        const io = getIO()
+        io.to(`user:${task.user_id}`).emit('approval:required', {
+          taskId: task.id as string,
+          approvalId: approval.id as string,
+          command,
+          reason,
+        })
+      } catch { /* ignore */ }
+    }
+
+    return reply.status(201).send(approval)
+  })
+
   // POST /approvals/:id/respond — mobile app approves or rejects
   fastify.post('/:id/respond', { onRequest: [fastify.authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string }

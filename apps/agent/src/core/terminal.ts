@@ -6,12 +6,14 @@ const execAsync = promisify(exec)
 
 // ─── Permission rules ─────────────────────────────────────────────────────────
 const SAFE_PATTERNS = [
-  /^npm (test|run lint|run type-check|run build)$/,
+  /^npm (test|run lint|run type-check|run build)/,
+  /^npm (run )?[a-zA-Z0-9_-]+(\s+--.+)?$/,
   /^npx tsc/,
-  /^git (status|diff|log|show)/,
-  /^ls /,
+  /^git (status|diff|log|show|branch)/,
+  /^ls/,
   /^cat /,
   /^echo /,
+  /^pwd/,
 ]
 
 const BLOCKED_PATTERNS = [
