@@ -100,7 +100,7 @@ export async function runAgentLoop(opts: AgentRunOptions): Promise<AgentRunResul
 
   const genAI = new GoogleGenerativeAI(geminiApiKey)
   const model = genAI.getGenerativeModel({
-    model: 'gemini-1.5-pro',
+    model: 'gemini-3.6-flash',
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tools: tools as any,
     systemInstruction: `You are CodeAway, an expert AI coding agent running on a developer's laptop.
