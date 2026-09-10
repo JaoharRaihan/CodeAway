@@ -1,7 +1,7 @@
 import axios from 'axios'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 
-export const DEFAULT_API_URL = 'http://192.168.0.234:3001'
+export const DEFAULT_API_URL = 'https://codeaway-backend-fp72.onrender.com'
 
 export const api = axios.create({
   baseURL: DEFAULT_API_URL,
