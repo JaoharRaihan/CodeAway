@@ -1,0 +1,35 @@
+{
+  "name": "codeaway-agent",
+  "version": "0.1.0",
+  "description": "CodeAway laptop agent — receives tasks from your phone and runs AI on your project",
+  "private": true,
+  "bin": {
+    "codeaway": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@codeaway/shared": "*",
+    "@google/generative-ai": "^0.15.0",
+    "axios": "^1.7.2",
+    "chalk": "^4.1.2",
+    "commander": "^12.1.0",
+    "diff": "^5.2.0",
+    "ignore": "^5.3.1",
+    "ora": "^5.4.1",
+    "prompts": "^2.4.2",
+    "simple-git": "^3.25.0",
+    "socket.io-client": "^4.7.5"
+  },
+  "devDependencies": {
+    "@types/diff": "^5.2.3",
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^20.14.2",
+    "@types/prompts": "^2.4.9",
+    "tsx": "^4.15.7",
+    "typescript": "^5.4.5"
+  }
+}

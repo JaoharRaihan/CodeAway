@@ -1,0 +1,21 @@
+{
+  "name": "codeaway",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "backend"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:agent": "npm run dev --workspace=apps/agent",
+    "build:backend": "npm run build --workspace=backend",
+    "build:shared": "npm run build --workspace=packages/shared",
+    "build": "npm run build:shared && npm run build:backend",
+    "start": "node backend/dist/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
