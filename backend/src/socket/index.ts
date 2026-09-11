@@ -17,6 +17,9 @@ export function getIO(): Server {
 export function initSocket(httpServer: any): Server {
   _io = new Server(httpServer, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
+    transports: ['websocket', 'polling'],
+    pingInterval: 25000,
+    pingTimeout: 20000,
   })
 
   _io!.on('connection', (socket) => {

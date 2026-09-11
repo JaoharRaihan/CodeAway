@@ -82,8 +82,10 @@ export async function connectCommand(opts: { workspace?: string }) {
   // ── 5. Connect Socket.IO ────────────────────────────────────────────────────
   const socket: Socket<ServerToAgentEvents, AgentToServerEvents> = ioClient(config.apiUrl!, {
     auth: { token: config.token },
+    transports: ['websocket', 'polling'],
     reconnection: true,
-    reconnectionDelay: 3000,
+    reconnectionDelay: 2000,
+    reconnectionDelayMax: 5000,
   })
 
   const workspace = new WorkspaceManager(workspacePath)

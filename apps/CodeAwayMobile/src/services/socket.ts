@@ -13,8 +13,10 @@ export async function connectSocket(userId: string): Promise<Socket<ServerToClie
 
   socket = io(serverUrl, {
     auth: { token },
+    transports: ['websocket', 'polling'],
     reconnection: true,
-    reconnectionDelay: 3000,
+    reconnectionDelay: 2000,
+    reconnectionDelayMax: 5000,
   }) as Socket<ServerToClientEvents, ClientToServerEvents>
 
   socket.on('connect', () => {
