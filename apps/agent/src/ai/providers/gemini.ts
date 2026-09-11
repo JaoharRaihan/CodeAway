@@ -34,41 +34,59 @@ export class GeminiProvider implements AIProvider {
       tools: [{ functionDeclarations }],
     }
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
+    const maxRetries = 4
+    let attempt = 0
+    let lastError = ''
 
-    const data: any = await res.json()
-    if (!res.ok) {
-      throw new Error(data.error?.message || `Gemini API error: ${res.statusText}`)
-    }
+    while (attempt < maxRetries) {
+      attempt++
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
 
-    const candidate = data.candidates?.[0]
-    if (!candidate || !candidate.content) {
-      return { text: '' }
-    }
+      const data: any = await res.json()
+      if (res.status === 429 || data.error?.code === 429 || data.error?.status === 'RESOURCE_EXHAUSTED') {
+        const errorMsg = data.error?.message || ''
+        const match = errorMsg.match(/retry in\s+([\d.]+)\s*s/i)
+        const delaySeconds = match ? Math.ceil(parseFloat(match[1])) + 2 : 15 * attempt
+        console.log(`\n⏳ Gemini 15 RPM free-tier rate limit reached. Waiting ${delaySeconds}s before auto-retrying (attempt ${attempt}/${maxRetries})...`)
+        await new Promise((r) => setTimeout(r, delaySeconds * 1000))
+        continue
+      }
 
-    const parts = candidate.content.parts || []
-    const toolCalls: ToolCall[] = []
-    const texts: string[] = []
+      if (!res.ok) {
+        throw new Error(data.error?.message || `Gemini API error: ${res.statusText}`)
+      }
 
-    for (const part of parts) {
-      if (part.text) texts.push(part.text)
-      if (part.functionCall) {
-        toolCalls.push({
-          id: part.functionCall.name + '_' + Date.now(),
-          name: part.functionCall.name,
-          args: part.functionCall.args || {},
-        })
+      const candidate = data.candidates?.[0]
+      if (!candidate || !candidate.content) {
+        return { text: '' }
+      }
+
+      const parts = candidate.content.parts || []
+      const toolCalls: ToolCall[] = []
+      const texts: string[] = []
+
+      for (const part of parts) {
+        if (part.text) texts.push(part.text)
+        if (part.functionCall) {
+          toolCalls.push({
+            id: part.functionCall.name + '_' + Date.now(),
+            name: part.functionCall.name,
+            args: part.functionCall.args || {},
+          })
+        }
+      }
+
+      return {
+        text: texts.join('\n'),
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        rawContent: candidate.content,
       }
     }
 
-    return {
-      text: texts.join('\n'),
-      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      rawContent: candidate.content,
-    }
+    throw new Error(`Gemini rate limit exceeded after ${maxRetries} retries: ${lastError}`)
   }
 }
