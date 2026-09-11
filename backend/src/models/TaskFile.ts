@@ -21,4 +21,6 @@ const TaskFileSchema = new Schema<ITaskFile>({
   created_at: { type: Date, default: Date.now },
 })
 
+TaskFileSchema.index({ task_id: 1, created_at: 1 })
+
 export const TaskFile = mongoose.model<ITaskFile>('TaskFile', TaskFileSchema)

@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
-import { Task } from '../models/Task'
+import { Task, isValidTaskTransition } from '../models/Task'
 import { TaskEvent } from '../models/TaskEvent'
 import { TaskFile } from '../models/TaskFile'
 import { getIO } from '../socket'
@@ -68,6 +68,8 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /tasks/:id/events — full event history
   fastify.get('/:id/events', { onRequest: [fastify.authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string }
+    const task = await Task.findOne({ _id: id, user_id: request.user.userId })
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
     const events = await TaskEvent.find({ task_id: id }).sort({ created_at: 1 })
     return events
   })
@@ -75,6 +77,8 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /tasks/:id/files — files changed by the agent
   fastify.get('/:id/files', { onRequest: [fastify.authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string }
+    const task = await Task.findOne({ _id: id, user_id: request.user.userId })
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
     const files = await TaskFile.find({ task_id: id }).sort({ created_at: 1 })
     return files
   })
@@ -82,12 +86,15 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
   // PATCH /tasks/:id/cancel
   fastify.patch('/:id/cancel', { onRequest: [fastify.authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string }
-    const task = await Task.findOneAndUpdate(
-      { _id: id, user_id: request.user.userId, status: { $in: ['queued', 'running', 'waiting_approval', 'testing'] } },
-      { status: 'cancelled' },
-      { new: true }
-    )
-    if (!task) return reply.status(404).send({ error: 'Task not found or cannot be cancelled' })
+    const task = await Task.findOne({ _id: id, user_id: request.user.userId })
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
+
+    if (!isValidTaskTransition(task.status, 'cancelled')) {
+      return reply.status(400).send({ error: `Cannot cancel task currently in "${task.status}" state` })
+    }
+
+    task.status = 'cancelled'
+    await task.save()
 
     // Notify agent to abort
     try {
@@ -104,21 +111,24 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
     return task
   })
 
-  // POST /tasks/:id/emergency-stop
+  // POST /tasks/:id/emergency-stop — halts agent execution and sets STOPPED
   fastify.post('/:id/emergency-stop', { onRequest: [fastify.authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string }
-    const task = await Task.findOneAndUpdate(
-      { _id: id, user_id: request.user.userId, status: { $in: ['queued', 'running', 'waiting_approval', 'testing'] } },
-      { status: 'cancelled' },
-      { new: true }
-    )
-    if (!task) return reply.status(404).send({ error: 'Task not found or not in a cancellable state' })
+    const task = await Task.findOne({ _id: id, user_id: request.user.userId })
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
 
-    // Log the abort event
+    if (!isValidTaskTransition(task.status, 'stopped')) {
+      return reply.status(400).send({ error: `Cannot stop task currently in "${task.status}" state` })
+    }
+
+    task.status = 'stopped'
+    await task.save()
+
+    // Log the stop event
     await TaskEvent.create({
       task_id: task._id,
       event_type: 'error',
-      message: '🛑 Emergency stop triggered: active command killed and agent halted.',
+      message: '🛑 Task stopped by developer: active command killed and agent halted.',
     })
 
     try {
@@ -127,19 +137,76 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
       io.to(`device:${task.device_id}`).emit('task:abort', {
         taskId: task.id as string,
       })
-      // Broadcast to phone
+      // Broadcast stopped status to phone
       io.to(`user:${request.user.userId}`).emit('task:status_changed', {
         taskId: task.id as string,
-        status: 'cancelled',
+        status: 'stopped',
+        message: 'Stopped. No further changes will be made.',
       })
       io.to(`user:${request.user.userId}`).emit('task:event', {
         taskId: task.id as string,
         event: {
-          type: 'error',
-          message: '🛑 Emergency stop triggered: active command killed and agent halted.',
+          type: 'assistant_message',
+          message: 'Stopped. No further changes will be made.',
         },
       })
     } catch { /* agent offline */ }
+
+    return reply.status(200).send({ ok: true, task })
+  })
+
+  // POST /tasks/:id/pause — pauses active task execution
+  fastify.post('/:id/pause', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const task = await Task.findOne({ _id: id, user_id: request.user.userId })
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
+
+    if (!isValidTaskTransition(task.status, 'paused')) {
+      return reply.status(400).send({ error: `Cannot pause task currently in "${task.status}" state` })
+    }
+
+    task.status = 'paused'
+    await task.save()
+
+    await TaskEvent.create({
+      task_id: task._id,
+      event_type: 'assistant_message',
+      message: '⏸️ Task paused. Waiting for your instruction to resume.',
+    })
+
+    try {
+      const io = getIO()
+      io.to(`device:${task.device_id}`).emit('task:pause', { taskId: task.id as string })
+      io.to(`user:${request.user.userId}`).emit('task:status_changed', { taskId: task.id as string, status: 'paused' })
+    } catch { /* offline */ }
+
+    return reply.status(200).send({ ok: true, task })
+  })
+
+  // POST /tasks/:id/resume — resumes paused or stopped task
+  fastify.post('/:id/resume', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const task = await Task.findOne({ _id: id, user_id: request.user.userId })
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
+
+    if (!isValidTaskTransition(task.status, 'running')) {
+      return reply.status(400).send({ error: `Cannot resume task currently in "${task.status}" state` })
+    }
+
+    task.status = 'running'
+    await task.save()
+
+    await TaskEvent.create({
+      task_id: task._id,
+      event_type: 'assistant_message',
+      message: '▶️ Task resumed. Continuing execution.',
+    })
+
+    try {
+      const io = getIO()
+      io.to(`device:${task.device_id}`).emit('task:resume', { taskId: task.id as string })
+      io.to(`user:${request.user.userId}`).emit('task:status_changed', { taskId: task.id as string, status: 'running' })
+    } catch { /* offline */ }
 
     return reply.status(200).send({ ok: true, task })
   })
@@ -151,6 +218,12 @@ const taskRoutes: FastifyPluginAsync = async (fastify) => {
 
     const task = await Task.findOne({ _id: id, user_id: request.user.userId })
     if (!task) return reply.status(404).send({ error: 'Task not found' })
+
+    if (!isValidTaskTransition(task.status, 'running')) {
+      return reply.status(400).send({
+        error: `Cannot send follow-up to task in "${task.status}" state. Please create a new task instead.`,
+      })
+    }
 
     // Record user message in event history
     const taskEvent = await TaskEvent.create({

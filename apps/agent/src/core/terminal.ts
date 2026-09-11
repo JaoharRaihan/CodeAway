@@ -4,30 +4,41 @@ import type { PermissionLevel } from '@codeaway/shared'
 // Map of active running processes by taskId for Emergency Stop
 const activeProcesses = new Map<string, ChildProcess>()
 
+/**
+ * Terminates an active process and its entire process group using SIGTERM, followed by SIGKILL if needed.
+ */
 export function killActiveTaskProcess(taskId: string): boolean {
   const proc = activeProcesses.get(taskId)
-  if (proc) {
+  if (proc && proc.pid) {
     try {
-      proc.kill('SIGTERM')
-      setTimeout(() => {
-        try { proc.kill('SIGKILL') } catch { /* ignore */ }
-      }, 2000)
-      activeProcesses.delete(taskId)
-      return true
+      // Send SIGTERM to process group (negative PID)
+      process.kill(-proc.pid, 'SIGTERM')
     } catch {
-      return false
+      try { proc.kill('SIGTERM') } catch { /* ignore */ }
     }
+
+    setTimeout(() => {
+      try {
+        if (proc.pid) process.kill(-proc.pid, 'SIGKILL')
+      } catch {
+        try { proc.kill('SIGKILL') } catch { /* ignore */ }
+      }
+    }, 1500)
+
+    activeProcesses.delete(taskId)
+    return true
   }
   return false
 }
 
 // ─── Permission rules ─────────────────────────────────────────────────────────
 const SAFE_PATTERNS = [
-  /^npm (test|run lint|run type-check|run build|run tsc)/,
+  /^npm (test|run lint|run type-check|run build|run tsc)\b/,
   /^npm (run )?[a-zA-Z0-9_-]+(\s+--.+)?$/,
-  /^npx tsc/,
-  /^npx jest/,
-  /^git (status|diff|log|show|branch|rev-parse)/,
+  /^npx tsc\b/,
+  /^npx jest\b/,
+  /^npx vitest\b/,
+  /^git (status|diff|log|show|branch|rev-parse)\b/,
   /^ls(\s+-[a-zA-Z]+)?(\s+.+)?$/,
   /^cat /,
   /^echo /,
@@ -37,31 +48,35 @@ const SAFE_PATTERNS = [
 ]
 
 const BLOCKED_PATTERNS = [
-  /sudo/,
-  /rm\s+-rf\s+\//,
-  /mkfs/,
+  /\bsudo\b/,
+  /rm\s+-rf\s+(\/|~|\$HOME)/,
+  /\bmkfs\b/,
   /dd\s+if=/,
-  /chmod\s+777/,
+  /chmod\s+(-R\s+)?777/,
   /curl.*\|\s*(ba)?sh/,
   /wget.*\|\s*(ba)?sh/,
   /:(){ :\|:& };:/, // fork bomb
   />\s*\/dev\/sd/,
   />\s*\/dev\/null/,
   /kill\s+-9\s+1\b/,
-  /reboot|shutdown|init\s+0/,
-  /cat.*id_rsa/,
-  /cat.*\.env/,
-  /:\(\)\s*\{\s*:\|:&\s*\}\s*;/, // fork bomb
+  /\b(reboot|shutdown|init\s+0)\b/,
+  /(cat|grep|head|tail|more|less)\s+.*(id_rsa|\.env|credentials\.json|\.pem|\.key)/,
+  /git\s+push.*(\-f\b|--force)/,       // Destructive force push blocked
+  /git\s+reset\s+--hard/,              // Destructive hard reset blocked
+  /git\s+clean\s+-[a-zA-Z]*f/,         // Destructive clean blocked
+  /git\s+branch\s+-D\b/,               // Destructive forced branch deletion blocked
+  /:\(\)\s*\{\s*:\|:&\s*\}\s*;/,      // fork bomb
 ]
 
 const APPROVAL_PATTERNS = [
-  /^npm (install|i|add|update|uninstall)/,
-  /^yarn (add|remove|install)/,
-  /^pnpm (add|remove|install)/,
-  /^git (commit|push|reset|rebase|merge|checkout -b|clean)/,
-  /^rm /,
-  /^mv /,
-  /^cp -r/,
+  /^npm (install|i|add|update|uninstall)\b/,
+  /^yarn (add|remove|install)\b/,
+  /^pnpm (add|remove|install)\b/,
+  /^bun (add|remove|install)\b/,
+  /^git (commit|push|merge|rebase|checkout|restore|reset|clean|stash)\b/,
+  /^rm \b/,
+  /^mv \b/,
+  /^cp -r\b/,
 ]
 
 export function classifyCommand(command: string): PermissionLevel {
@@ -81,6 +96,8 @@ export interface RunResult {
   exitCode: number
 }
 
+const MAX_OUTPUT_CHARS = 50_000 // 50KB limit to prevent socket and memory blowout
+
 export async function runCommand(
   command: string,
   cwd: string,
@@ -91,10 +108,13 @@ export async function runCommand(
   return new Promise((resolve) => {
     let stdoutAcc = ''
     let stderrAcc = ''
+    let totalChars = 0
+    let truncatedNoticeSent = false
     let isSettled = false
 
     const proc = spawn('sh', ['-c', command], {
       cwd,
+      detached: true, // creates process group so child processes can be killed together
       env: {
         ...process.env,
         PATH: `/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${process.env.PATH || ''}`,
@@ -108,8 +128,7 @@ export async function runCommand(
     const timer = setTimeout(() => {
       if (!isSettled) {
         isSettled = true
-        if (taskId) activeProcesses.delete(taskId)
-        try { proc.kill('SIGTERM') } catch { /* ignore */ }
+        if (taskId) killActiveTaskProcess(taskId)
         resolve({
           stdout: stdoutAcc,
           stderr: stderrAcc + `\n[Command timed out after ${timeoutMs / 1000}s]`,
@@ -118,17 +137,37 @@ export async function runCommand(
       }
     }, timeoutMs)
 
-    proc.stdout.on('data', (data) => {
+    const appendData = (data: any, stream: 'stdout' | 'stderr') => {
       const str = data.toString()
-      stdoutAcc += str
-      if (onOutput) onOutput(str, 'stdout')
-    })
+      if (totalChars >= MAX_OUTPUT_CHARS) {
+        if (!truncatedNoticeSent) {
+          truncatedNoticeSent = true
+          const notice = '\n[...output truncated to 50KB to protect network and memory...]'
+          if (stream === 'stdout') stdoutAcc += notice
+          else stderrAcc += notice
+          if (onOutput) onOutput(notice, stream)
+        }
+        return
+      }
 
-    proc.stderr.on('data', (data) => {
-      const str = data.toString()
-      stderrAcc += str
-      if (onOutput) onOutput(str, 'stderr')
-    })
+      const remainingAllowed = MAX_OUTPUT_CHARS - totalChars
+      const chunk = str.slice(0, remainingAllowed)
+      totalChars += chunk.length
+      if (stream === 'stdout') stdoutAcc += chunk
+      else stderrAcc += chunk
+      if (onOutput) onOutput(chunk, stream)
+
+      if (totalChars >= MAX_OUTPUT_CHARS && !truncatedNoticeSent) {
+        truncatedNoticeSent = true
+        const notice = '\n[...output truncated to 50KB to protect network and memory...]'
+        if (stream === 'stdout') stdoutAcc += notice
+        else stderrAcc += notice
+        if (onOutput) onOutput(notice, stream)
+      }
+    }
+
+    proc.stdout?.on('data', (data) => appendData(data, 'stdout'))
+    proc.stderr?.on('data', (data) => appendData(data, 'stderr'))
 
     proc.on('close', (code, signal) => {
       if (!isSettled) {

@@ -12,9 +12,15 @@ const approvalRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /approvals?task_id=xxx
   fastify.get('/', { onRequest: [fastify.authenticate] }, async (request) => {
     const { task_id } = request.query as { task_id?: string }
-    const filter: Record<string, unknown> = {}
-    if (task_id) filter.task_id = task_id
-    return Approval.find(filter).sort({ created_at: -1 })
+    if (task_id) {
+      const task = await Task.findOne({ _id: task_id, user_id: request.user.userId })
+      if (!task) return []
+      return Approval.find({ task_id }).sort({ created_at: -1 })
+    }
+
+    const userTasks = await Task.find({ user_id: request.user.userId }).select('_id')
+    const taskIds = userTasks.map((t) => t._id)
+    return Approval.find({ task_id: { $in: taskIds } }).sort({ created_at: -1 })
   })
 
   // POST /approvals — laptop agent creates an approval request
@@ -25,6 +31,9 @@ const approvalRoutes: FastifyPluginAsync = async (fastify) => {
       reason: string
     }
 
+    const task = await Task.findById(task_id)
+    if (!task) return reply.status(404).send({ error: 'Task not found' })
+
     const approval = await Approval.create({
       task_id,
       command,
@@ -32,19 +41,16 @@ const approvalRoutes: FastifyPluginAsync = async (fastify) => {
       status: 'pending',
     })
 
-    const task = await Task.findById(task_id)
-    if (task) {
-      await Task.findByIdAndUpdate(task.id, { status: 'waiting_approval' })
-      try {
-        const io = getIO()
-        io.to(`user:${task.user_id}`).emit('approval:required', {
-          taskId: task.id as string,
-          approvalId: approval.id as string,
-          command,
-          reason,
-        })
-      } catch { /* ignore */ }
-    }
+    await Task.findByIdAndUpdate(task.id, { status: 'waiting_approval' })
+    try {
+      const io = getIO()
+      io.to(`user:${task.user_id}`).emit('approval:required', {
+        taskId: task.id as string,
+        approvalId: approval.id as string,
+        command,
+        reason,
+      })
+    } catch { /* ignore */ }
 
     return reply.status(201).send(approval)
   })
@@ -54,28 +60,34 @@ const approvalRoutes: FastifyPluginAsync = async (fastify) => {
     const { id } = request.params as { id: string }
     const { decision } = respondSchema.parse(request.body)
 
-    const approval = await Approval.findByIdAndUpdate(
-      id,
-      { status: decision, responded_at: new Date() },
-      { new: true }
-    )
+    const approval = await Approval.findById(id)
     if (!approval) return reply.status(404).send({ error: 'Approval not found' })
 
-    const task = await Task.findById(approval.task_id)
-    if (task) {
-      // Resume task status
-      await Task.findByIdAndUpdate(task.id, { status: 'running' })
+    // Verify task ownership
+    const task = await Task.findOne({ _id: approval.task_id, user_id: request.user.userId })
+    if (!task) return reply.status(403).send({ error: 'Unauthorized' })
 
-      // Notify the agent
-      try {
-        const io = getIO()
-        io.to(`device:${task.device_id}`).emit('approval:response', {
-          approvalId: id,
-          taskId: task.id as string,
-          decision,
-        })
-      } catch { /* agent offline */ }
-    }
+    approval.status = decision
+    approval.responded_at = new Date()
+    await approval.save()
+
+    // Resume task status
+    await Task.findByIdAndUpdate(task.id, { status: 'running' })
+
+    // Notify the agent and user
+    try {
+      const io = getIO()
+      io.to(`device:${task.device_id}`).emit('approval:response', {
+        approvalId: id,
+        taskId: task.id as string,
+        decision,
+      })
+      io.to(`user:${task.user_id}`).emit('task:status_changed', {
+        taskId: task.id,
+        status: 'running',
+        message: decision === 'approved' ? 'Action approved' : 'Action rejected',
+      })
+    } catch { /* agent offline */ }
 
     return approval
   })

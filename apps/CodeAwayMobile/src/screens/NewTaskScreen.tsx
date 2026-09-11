@@ -19,7 +19,7 @@ export default function NewTaskScreen({ navigation, route }: Props) {
   const [devices, setDevices] = useState<any[]>([])
   const [projects, setProjects] = useState<any[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string>(route.params?.deviceId ?? '')
-  const [selectedProject, setSelectedProject] = useState<string>('')
+  const [selectedProject, setSelectedProject] = useState<string>(route.params?.projectId ?? '')
   const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash-lite')
   const [prompt, setPrompt] = useState('')
   const [loading, setLoading] = useState(false)
@@ -41,7 +41,12 @@ export default function NewTaskScreen({ navigation, route }: Props) {
     if (selectedDevice) {
       api.get(`/projects?device_id=${selectedDevice}`).then((r) => {
         setProjects(r.data)
-        if (r.data[0]) setSelectedProject(r.data[0]._id)
+        const targetProjectId = route.params?.projectId
+        if (targetProjectId && r.data.some((p: any) => p._id === targetProjectId)) {
+          setSelectedProject(targetProjectId)
+        } else if (r.data[0] && !selectedProject) {
+          setSelectedProject(r.data[0]._id)
+        }
       })
     }
   }, [selectedDevice])

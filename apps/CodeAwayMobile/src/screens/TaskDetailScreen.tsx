@@ -8,6 +8,8 @@ import api from '../services/api'
 import { connectSocket } from '../services/socket'
 import { useTaskStore } from '../store/taskStore'
 import { useAuthStore } from '../store/authStore'
+import { ActionCard } from '../components/ActionCard'
+import type { ActionCardData } from '@codeaway/shared'
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack'
 import type { RouteProp } from '@react-navigation/native'
 import type { RootStackParamList } from '../navigation/types'
@@ -32,67 +34,116 @@ const EVENT_ICONS: Record<string, string> = {
 const STATUS_COLOR: Record<string, string> = {
   queued: '#888',
   running: '#6c63ff',
+  paused: '#fbbf24',
   waiting_approval: '#f59e0b',
+  testing: '#a78bfa',
   completed: '#4ade80',
   failed: '#f87171',
+  stopped: '#fb7185',
   cancelled: '#666',
 }
 
 export default function TaskDetailScreen({ route, navigation }: Props) {
   const { taskId } = route.params
   const { user } = useAuthStore()
-  const { tasks, liveEvents, addLiveEvent, updateTaskStatus } = useTaskStore()
+  const { tasks, liveEvents, addLiveEvent, setTaskEvents, updateTaskStatus } = useTaskStore()
   const scrollRef = useRef<any>(null)
 
   const [activeTab, setActiveTab] = useState<'chat' | 'files' | 'terminal'>('chat')
   const [followUpText, setFollowUpText] = useState('')
+  const [streamingText, setStreamingText] = useState('')
   const [sending, setSending] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [pausing, setPausing] = useState(false)
   const [files, setFiles] = useState<any[]>([])
   const [loadingFiles, setLoadingFiles] = useState(false)
+  const [pendingApproval, setPendingApproval] = useState<{ _id: string; command: string; reason: string } | null>(null)
+  const [respondingApproval, setRespondingApproval] = useState(false)
 
   const task = tasks.find((t) => t._id === taskId)
   const events = liveEvents[taskId] ?? []
 
   useEffect(() => {
-    // Load task events history
+    // Load task events history (idempotent seeding via setTaskEvents)
     api.get(`/tasks/${taskId}/events`).then((r) => {
-      r.data.forEach((e: any) => {
-        addLiveEvent(taskId, { type: e.event_type, message: e.message, metadata: e.metadata })
-      })
+      const loaded = r.data.map((e: any) => ({
+        id: e._id,
+        type: e.event_type,
+        message: e.message,
+        metadata: e.metadata,
+      }))
+      setTaskEvents(taskId, loaded)
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
-    })
+    }).catch(() => {})
 
     // Load changed files
     loadChangedFiles()
 
-    // Subscribe to live events
+    // Load any pending approval for this task (server-authoritative)
+    api.get('/approvals', { params: { task_id: taskId } }).then((r) => {
+      const pending = r.data.find((a: any) => a.status === 'pending')
+      if (pending) {
+        setPendingApproval({ _id: pending._id, command: pending.command, reason: pending.reason })
+      }
+    }).catch(() => {})
+
+    // Subscribe to live events with clean listener lifecycle
+    let activeSocket: any = null
+    let onTaskEvent: any = null
+    let onStatusChanged: any = null
+    let onApprovalRequired: any = null
+
     if (user) {
       connectSocket(user.id).then((socket) => {
-        socket.on('task:event', ({ taskId: tid, event }) => {
+        activeSocket = socket
+
+        onTaskEvent = ({ taskId: tid, event }: any) => {
           if (tid === taskId) {
-            addLiveEvent(taskId, event)
+            if (event.type === 'assistant_message_chunk') {
+              setStreamingText((prev) => prev + event.message)
+            } else if (event.type === 'assistant_message') {
+              setStreamingText('')
+              addLiveEvent(taskId, event)
+            } else {
+              addLiveEvent(taskId, event)
+            }
+
             if (event.type === 'file_modified' || event.type === 'task_completed') {
               loadChangedFiles()
             }
             setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
           }
-        })
-        socket.on('task:status_changed', ({ taskId: tid, status }) => {
-          if (tid === taskId) updateTaskStatus(taskId, status)
-        })
-        socket.on('approval:required', ({ taskId: tid, approvalId, command, reason }) => {
+        }
+
+        onStatusChanged = ({ taskId: tid, status }: any) => {
           if (tid === taskId) {
-            Alert.alert(
-              '⚠️ Approval Required',
-              `AI wants to run:\n\n${command}\n\nReason: ${reason}`,
-              [
-                { text: 'Reject', style: 'destructive', onPress: () => api.post(`/approvals/${approvalId}/respond`, { decision: 'rejected' }) },
-                { text: 'Approve', onPress: () => api.post(`/approvals/${approvalId}/respond`, { decision: 'approved' }) },
-              ]
-            )
+            setStopping(false)
+            setPausing(false)
+            if (status !== 'waiting_approval') {
+              setPendingApproval(null)
+            }
+            updateTaskStatus(taskId, status)
           }
-        })
+        }
+
+        onApprovalRequired = ({ taskId: tid, approvalId, command, reason }: any) => {
+          if (tid === taskId) {
+            setPendingApproval({ _id: approvalId, command, reason })
+          }
+        }
+
+        socket.on('task:event', onTaskEvent)
+        socket.on('task:status_changed', onStatusChanged)
+        socket.on('approval:required', onApprovalRequired)
       })
+    }
+
+    return () => {
+      if (activeSocket) {
+        if (onTaskEvent) activeSocket.off('task:event', onTaskEvent)
+        if (onStatusChanged) activeSocket.off('task:status_changed', onStatusChanged)
+        if (onApprovalRequired) activeSocket.off('approval:required', onApprovalRequired)
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId])
@@ -115,10 +166,30 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
     navigation.goBack()
   }
 
+  const handlePause = async () => {
+    try {
+      setPausing(true)
+      await api.post(`/tasks/${taskId}/pause`)
+    } catch (err: any) {
+      setPausing(false)
+      Alert.alert('Error', err.response?.data?.error ?? err.message)
+    }
+  }
+
+  const handleResume = async () => {
+    try {
+      setPausing(true)
+      await api.post(`/tasks/${taskId}/resume`)
+    } catch (err: any) {
+      setPausing(false)
+      Alert.alert('Error', err.response?.data?.error ?? err.message)
+    }
+  }
+
   const handleEmergencyStop = () => {
     Alert.alert(
-      'Emergency Stop',
-      'Immediately terminate any running command on your Mac and stop this task?',
+      'Stop Agent',
+      'Immediately halt execution on your Mac and stop this task? No further changes will be made.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -126,19 +197,30 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
           style: 'destructive',
           onPress: async () => {
             try {
+              setStopping(true)
               await api.post(`/tasks/${taskId}/emergency-stop`)
-              updateTaskStatus(taskId, 'cancelled')
-              addLiveEvent(taskId, {
-                type: 'error',
-                message: '🛑 Emergency stop triggered: active command killed and agent halted.',
-              })
             } catch (err: any) {
+              setStopping(false)
               Alert.alert('Error', err.response?.data?.error ?? err.message)
             }
           },
         },
       ]
     )
+  }
+
+  const handleRespondApproval = async (decision: 'approved' | 'rejected') => {
+    if (!pendingApproval) return
+    try {
+      setRespondingApproval(true)
+      await api.post(`/approvals/${pendingApproval._id}/respond`, { decision })
+      setPendingApproval(null)
+      updateTaskStatus(taskId, 'running')
+    } catch (err: any) {
+      Alert.alert('Error', err.response?.data?.error ?? 'Failed to submit decision')
+    } finally {
+      setRespondingApproval(false)
+    }
   }
 
   const handleSendFollowUp = async () => {
@@ -195,16 +277,43 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
               <Text style={styles.modelPillText}>{modelBadgeText}</Text>
             </View>
           </View>
-          {['running', 'waiting_approval', 'testing'].includes(task?.status ?? '') && (
-            <TouchableOpacity onPress={handleEmergencyStop} style={styles.emergencyBtn}>
-              <Text style={styles.emergencyText}>🛑 Stop</Text>
-            </TouchableOpacity>
-          )}
-          {task?.status === 'queued' && (
-            <TouchableOpacity onPress={cancelTask} style={styles.cancelBtn}>
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-          )}
+          <View style={styles.headerControls}>
+            {task?.status === 'running' && (
+              <TouchableOpacity
+                onPress={handlePause}
+                style={styles.pauseBtn}
+                disabled={pausing || stopping}
+              >
+                <Text style={styles.pauseText}>{pausing ? '...' : '⏸️ Pause'}</Text>
+              </TouchableOpacity>
+            )}
+
+            {task?.status === 'paused' && (
+              <TouchableOpacity
+                onPress={handleResume}
+                style={styles.resumeBtn}
+                disabled={pausing || stopping}
+              >
+                <Text style={styles.resumeText}>{pausing ? '...' : '▶️ Resume'}</Text>
+              </TouchableOpacity>
+            )}
+
+            {['running', 'waiting_approval', 'testing', 'paused'].includes(task?.status ?? '') && (
+              <TouchableOpacity
+                onPress={handleEmergencyStop}
+                style={[styles.emergencyBtn, stopping && styles.stoppingBtn]}
+                disabled={stopping}
+              >
+                <Text style={styles.emergencyText}>{stopping ? 'Stopping...' : '🛑 Stop'}</Text>
+              </TouchableOpacity>
+            )}
+
+            {task?.status === 'queued' && (
+              <TouchableOpacity onPress={cancelTask} style={styles.cancelBtn}>
+                <Text style={styles.cancelText}>Cancel</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
 
         {/* Tab Navigation */}
@@ -232,6 +341,41 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
             </Text>
           </TouchableOpacity>
         </View>
+
+        {/* Server-Authoritative Approval Banner */}
+        {pendingApproval && (
+          <View style={styles.approvalBanner}>
+            <View style={styles.approvalHeader}>
+              <Text style={styles.approvalTitle}>⚠️ Action Requires Approval</Text>
+              <Text style={styles.approvalReason}>{pendingApproval.reason}</Text>
+            </View>
+            <View style={styles.approvalCodeBox}>
+              <Text style={styles.approvalCodeText} numberOfLines={3}>
+                {pendingApproval.command}
+              </Text>
+            </View>
+            <View style={styles.approvalActions}>
+              <TouchableOpacity
+                style={[styles.approvalBtn, styles.approvalRejectBtn]}
+                onPress={() => handleRespondApproval('rejected')}
+                disabled={respondingApproval}
+              >
+                <Text style={styles.approvalRejectText}>
+                  {respondingApproval ? '...' : '❌ Reject'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.approvalBtn, styles.approvalApproveBtn]}
+                onPress={() => handleRespondApproval('approved')}
+                disabled={respondingApproval}
+              >
+                <Text style={styles.approvalApproveText}>
+                  {respondingApproval ? '...' : '✅ Approve'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         {/* TAB 1: Chat Stream */}
         {activeTab === 'chat' && (
@@ -269,6 +413,35 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
                   )
                 }
 
+                if (e.event.type === 'assistant_message') {
+                  return (
+                    <View key={i} style={styles.assistantBubble}>
+                      <View style={styles.assistantHeader}>
+                        <View style={styles.avatarWrap}>
+                          <Text style={styles.avatarText}>🤖</Text>
+                        </View>
+                        <Text style={styles.assistantName}>CodeAway</Text>
+                        <View style={styles.roleBadge}>
+                          <Text style={styles.roleBadgeText}>SENIOR ENGINEER</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.assistantMsgText}>{e.event.message}</Text>
+                    </View>
+                  )
+                }
+
+                if (e.event.type === 'action_card' && e.event.metadata) {
+                  return <ActionCard key={i} card={e.event.metadata as unknown as ActionCardData} />
+                }
+
+                if (e.event.type === 'intent_classified') {
+                  return (
+                    <View key={i} style={styles.intentPill}>
+                      <Text style={styles.intentText}>{e.event.message}</Text>
+                    </View>
+                  )
+                }
+
                 if (e.event.type === 'task_completed') {
                   return (
                     <View key={i} style={styles.resultCard}>
@@ -278,27 +451,73 @@ export default function TaskDetailScreen({ route, navigation }: Props) {
                   )
                 }
 
-                return (
-                  <View key={i} style={styles.eventRow}>
-                    <Text style={styles.eventIcon}>{EVENT_ICONS[e.event.type] ?? '•'}</Text>
-                    <Text style={styles.eventMsg}>{e.event.message}</Text>
-                  </View>
-                )
+                if (e.event.type === 'approval_required') {
+                  return (
+                    <View key={i} style={styles.approvalCard}>
+                      <Text style={styles.approvalLabel}>⚠️ APPROVAL REQUIRED</Text>
+                      <Text style={styles.approvalText}>{e.event.message}</Text>
+                    </View>
+                  )
+                }
+
+                // If older or uncategorized event, show minimal subtle row
+                if (!['file_read', 'command_output', 'command_started', 'assistant_message_chunk'].includes(e.event.type)) {
+                  return (
+                    <View key={i} style={styles.eventRow}>
+                      <Text style={styles.eventIcon}>{EVENT_ICONS[e.event.type] ?? '•'}</Text>
+                      <Text style={styles.eventMsg}>{e.event.message}</Text>
+                    </View>
+                  )
+                }
+                return null
               })}
 
-              {task?.status === 'running' && (
+              {/* Real-time streaming assistant bubble */}
+              {streamingText ? (
+                <View style={styles.assistantBubble}>
+                  <View style={styles.assistantHeader}>
+                    <View style={styles.avatarWrap}>
+                      <Text style={styles.avatarText}>🤖</Text>
+                    </View>
+                    <Text style={styles.assistantName}>CodeAway</Text>
+                    <View style={styles.roleBadgeLive}>
+                      <Text style={styles.roleBadgeLiveText}>TYPING...</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.assistantMsgText}>
+                    {streamingText}
+                    <Text style={styles.blinkingCursor}> ▌</Text>
+                  </Text>
+                </View>
+              ) : null}
+
+              {task?.status === 'running' && !streamingText && (
                 <View style={styles.agentActiveRow}>
                   <ActivityIndicator size="small" color="#6c63ff" />
-                  <Text style={styles.agentActiveText}>Agent is working on your request...</Text>
+                  <Text style={styles.agentActiveText}>Agent is thinking and working on your Mac...</Text>
                 </View>
               )}
             </ScrollView>
+
+            {/* Quick Suggestion Chips */}
+            <View style={styles.quickChipsRow}>
+              {['Why did you change that?', 'Run tests', 'Show diff', 'Continue', 'Stop'].map((chip) => (
+                <TouchableOpacity
+                  key={chip}
+                  style={styles.quickChip}
+                  onPress={() => setFollowUpText(chip)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.quickChipText}>{chip}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
             {/* Sticky Chat Input Bar */}
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.inputField}
-                placeholder="Send follow-up instruction..."
+                placeholder="Talk to your engineer or give instructions..."
                 placeholderTextColor="#666"
                 value={followUpText}
                 onChangeText={setFollowUpText}
@@ -446,6 +665,29 @@ const styles = (StyleSheet as any).create({
     fontSize: 11,
     fontWeight: '700',
   },
+  headerControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pauseBtn: {
+    backgroundColor: '#2e2008',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#78350f',
+  },
+  pauseText: { color: '#fbbf24', fontSize: 12, fontWeight: '700' },
+  resumeBtn: {
+    backgroundColor: '#0d2818',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#166534',
+  },
+  resumeText: { color: '#4ade80', fontSize: 12, fontWeight: '700' },
   cancelBtn: {
     backgroundColor: '#2a2a3a',
     borderRadius: 8,
@@ -462,6 +704,9 @@ const styles = (StyleSheet as any).create({
     borderColor: '#7f1d1d',
   },
   emergencyText: { color: '#f87171', fontSize: 12, fontWeight: '700' },
+  stoppingBtn: {
+    opacity: 0.6,
+  },
 
   tabBar: {
     flexDirection: 'row',
@@ -517,6 +762,132 @@ const styles = (StyleSheet as any).create({
     color: '#ffffff',
     fontSize: 14,
     lineHeight: 20,
+  },
+
+  assistantBubble: {
+    backgroundColor: '#12131e',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#25263a',
+    alignSelf: 'stretch',
+  },
+  assistantHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+  },
+  avatarWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#312e81',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarText: {
+    fontSize: 13,
+  },
+  assistantName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#e2e8f0',
+  },
+  roleBadge: {
+    backgroundColor: '#1e1b4b',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#3730a3',
+  },
+  roleBadgeText: {
+    color: '#818cf8',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  roleBadgeLive: {
+    backgroundColor: '#3b1016',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#7f1d1d',
+  },
+  roleBadgeLiveText: {
+    color: '#f87171',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  assistantMsgText: {
+    color: '#e2e8f0',
+    fontSize: 14,
+    lineHeight: 22,
+  },
+  blinkingCursor: {
+    color: '#818cf8',
+    fontWeight: 'bold',
+  },
+  intentPill: {
+    alignSelf: 'center',
+    backgroundColor: '#181826',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#2e2e48',
+    marginVertical: 6,
+  },
+  intentText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  approvalCard: {
+    backgroundColor: '#2a1a08',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#78350f',
+    padding: 12,
+    marginVertical: 6,
+  },
+  approvalLabel: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 4,
+  },
+  approvalText: {
+    color: '#fef3c7',
+    fontSize: 13,
+  },
+  quickChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#101018',
+    borderTopWidth: 1,
+    borderTopColor: '#1e1e2d',
+  },
+  quickChip: {
+    backgroundColor: '#1a1a28',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2e2e42',
+  },
+  quickChipText: {
+    color: '#a5b4fc',
+    fontSize: 11,
+    fontWeight: '600',
   },
 
   waitingWrap: { alignItems: 'center', padding: 32, gap: 12 },
@@ -710,5 +1081,80 @@ const styles = (StyleSheet as any).create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 12,
     lineHeight: 18,
+  },
+
+  /* Approval Banner Styles */
+  approvalBanner: {
+    backgroundColor: '#1f1606',
+    borderWidth: 1,
+    borderColor: '#f59e0b',
+    borderRadius: 14,
+    marginHorizontal: 16,
+    marginTop: 10,
+    marginBottom: 6,
+    padding: 14,
+    shadowColor: '#f59e0b',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  approvalHeader: {
+    marginBottom: 4,
+  },
+  approvalTitle: {
+    color: '#fbbf24',
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  approvalReason: {
+    color: '#ddd',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  approvalCodeBox: {
+    backgroundColor: '#0a0a0f',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginVertical: 8,
+    borderWidth: 1,
+    borderColor: '#2a2a3a',
+  },
+  approvalCodeText: {
+    color: '#38bdf8',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 12,
+  },
+  approvalActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  approvalBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  approvalRejectBtn: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#f87171',
+  },
+  approvalRejectText: {
+    color: '#f87171',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  approvalApproveBtn: {
+    backgroundColor: '#059669',
+  },
+  approvalApproveText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
   },
 })

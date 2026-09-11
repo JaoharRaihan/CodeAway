@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document, Types } from 'mongoose'
 import type { TaskStatus } from '@codeaway/shared'
+export { isValidTaskTransition, VALID_TASK_TRANSITIONS } from '@codeaway/shared'
 
 export interface ITask extends Document {
   user_id: Types.ObjectId
@@ -23,7 +24,17 @@ const TaskSchema = new Schema<ITask>({
   ai_model: { type: String, default: 'gemini-3.5-flash-lite' },
   status: {
     type: String,
-    enum: ['queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled'],
+    enum: [
+      'queued',
+      'running',
+      'paused',
+      'waiting_approval',
+      'testing',
+      'completed',
+      'failed',
+      'stopped',
+      'cancelled',
+    ],
     default: 'queued',
     index: true,
   },

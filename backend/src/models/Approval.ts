@@ -23,4 +23,6 @@ const ApprovalSchema = new Schema<IApproval>({
   responded_at: { type: Date },
 })
 
+ApprovalSchema.index({ task_id: 1, status: 1 })
+
 export const Approval = mongoose.model<IApproval>('Approval', ApprovalSchema)

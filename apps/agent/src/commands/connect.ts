@@ -3,17 +3,29 @@ import prompts from 'prompts'
 import ora from 'ora'
 import * as os from 'os'
 import * as path from 'path'
+import * as fs from 'fs'
 import { io as ioClient, Socket } from 'socket.io-client'
 import { api } from '../core/api'
 import { getConfig, saveConfig, isAuthenticated } from '../core/config'
 import { WorkspaceManager } from '../core/workspace'
 import { GitManager } from '../core/git'
-import { createTaskSession, runSessionTurn, abortTaskSession, type TaskSession } from '../ai/runner'
+import {
+  createTaskSession,
+  runSessionTurn,
+  abortTaskSession,
+  pauseTaskSession,
+  resumeTaskSession,
+  type TaskSession,
+} from '../ai/runner'
 import { providerRegistry } from '../ai/providers/registry'
 import type { ServerToAgentEvents, AgentToServerEvents } from '@codeaway/shared'
 
-// pending approval resolvers — keyed by approvalId
-const pendingApprovals = new Map<string, (approved: boolean) => void>()
+// pending approval resolvers — keyed by approvalId, tracking taskId and resolve callback
+interface PendingApprovalEntry {
+  taskId: string
+  resolve: (approved: boolean) => void
+}
+const pendingApprovals = new Map<string, PendingApprovalEntry>()
 
 export async function connectCommand(opts: { workspace?: string }) {
   if (!isAuthenticated()) {
@@ -84,8 +96,8 @@ export async function connectCommand(opts: { workspace?: string }) {
     auth: { token: config.token },
     transports: ['websocket', 'polling'],
     reconnection: true,
-    reconnectionDelay: 2000,
-    reconnectionDelayMax: 5000,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 3000,
   })
 
   const workspace = new WorkspaceManager(workspacePath)
@@ -102,6 +114,10 @@ export async function connectCommand(opts: { workspace?: string }) {
       token: config.token!,
       availableModels: providerRegistry.getAvailableModels(),
       currentProject: path.basename(workspacePath),
+      workspacePath,
+      workspaces: [
+        { name: path.basename(workspacePath), path: workspacePath },
+      ],
       version: '0.1.0',
     })
   })
@@ -125,17 +141,9 @@ export async function connectCommand(opts: { workspace?: string }) {
 
       socket.emit('approval:request', { taskId, userId, approvalId, command, reason })
 
-      // Wait for phone response (max 5 minutes)
+      // Server-authoritative: wait until developer explicitly responds or task is aborted
       return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          pendingApprovals.delete(approvalId)
-          resolve(false) // auto-reject on timeout
-        }, 5 * 60 * 1000)
-
-        pendingApprovals.set(approvalId, (approved) => {
-          clearTimeout(timeout)
-          resolve(approved)
-        })
+        pendingApprovals.set(approvalId, { taskId, resolve })
       })
     }
 
@@ -181,11 +189,27 @@ export async function connectCommand(opts: { workspace?: string }) {
     console.log(chalk.bold.cyan(`\n📨 New task received: ${taskId} [${model || 'gemini-3.5-flash'}]`))
     console.log(chalk.dim(`   ${prompt.slice(0, 120)}...`))
 
+    let taskWorkspace = workspace
+    let taskGit = git
+
+    if (projectId) {
+      try {
+        const projRes = await api.get(`/projects/${projectId}`)
+        if (projRes.data?.path && fs.existsSync(projRes.data.path)) {
+          taskWorkspace = new WorkspaceManager(projRes.data.path)
+          taskGit = new GitManager(projRes.data.path)
+          console.log(chalk.dim(`   Active project workspace: ${projRes.data.path}`))
+        }
+      } catch {
+        // Fall back to launch workspace
+      }
+    }
+
     const session = createTaskSession({
       taskId,
       userId,
-      workspace,
-      git,
+      workspace: taskWorkspace,
+      git: taskGit,
       geminiApiKey: geminiApiKey!,
       anthropicApiKey,
       openaiApiKey,
@@ -228,10 +252,10 @@ export async function connectCommand(opts: { workspace?: string }) {
 
   // ── 7. Handle approval responses from phone ─────────────────────────────────
   socket.on('approval:response', ({ approvalId, decision }) => {
-    const resolve = pendingApprovals.get(approvalId)
-    if (resolve) {
+    const entry = pendingApprovals.get(approvalId)
+    if (entry) {
       pendingApprovals.delete(approvalId)
-      resolve(decision === 'approved')
+      entry.resolve(decision === 'approved')
       console.log(
         decision === 'approved'
           ? chalk.green(`✅ Approval granted for ${approvalId}`)
@@ -245,23 +269,72 @@ export async function connectCommand(opts: { workspace?: string }) {
     console.log(chalk.red.bold(`\n🛑 Emergency Stop received for task ${taskId}`))
     const session = taskSessions.get(taskId)
     if (session) {
+      // Abort any pending approvals waiting for user response
+      for (const [appId, entry] of pendingApprovals.entries()) {
+        if (entry.taskId === taskId) {
+          entry.resolve(false)
+          pendingApprovals.delete(appId)
+        }
+      }
       abortTaskSession(session)
       console.log(chalk.red(`   Task ${taskId} execution aborted and child processes terminated.`))
+      // Two-way handshake: confirm daemon stopped
+      socket.emit('task:status:ack', {
+        taskId,
+        userId: session.userId,
+        status: 'stopped',
+        message: 'Stopped. No further changes will be made.',
+      })
     }
   })
 
-  // ── 9. Heartbeat ────────────────────────────────────────────────────────────
+  // ── 8b. Pause Task Execution ────────────────────────────────────────────────
+  socket.on('task:pause', ({ taskId }) => {
+    console.log(chalk.yellow.bold(`\n⏸️ Pause received for task ${taskId}`))
+    const session = taskSessions.get(taskId)
+    if (session) {
+      pauseTaskSession(session)
+      socket.emit('task:status:ack', {
+        taskId,
+        userId: session.userId,
+        status: 'paused',
+        message: 'Paused. Waiting for your instruction to resume.',
+      })
+    }
+  })
+
+  // ── 8c. Resume Task Execution ───────────────────────────────────────────────
+  socket.on('task:resume', ({ taskId }) => {
+    console.log(chalk.green.bold(`\n▶️ Resume received for task ${taskId}`))
+    const session = taskSessions.get(taskId)
+    if (session) {
+      resumeTaskSession(session)
+      socket.emit('task:status:ack', {
+        taskId,
+        userId: session.userId,
+        status: 'running',
+        message: 'Resumed. Continuing work.',
+      })
+    }
+  })
+
+  // ── 9. Heartbeat (10s interval keeps cloud reverse proxies and websockets alive)
   setInterval(() => {
-    socket.emit('agent:heartbeat', {
-      deviceId: deviceId!,
-      availableModels: providerRegistry.getAvailableModels(),
-      currentProject: path.basename(workspacePath),
-      version: '0.1.0',
-    })
-  }, 30_000)
+    if (socket.connected) {
+      socket.emit('agent:heartbeat', {
+        deviceId: deviceId!,
+        availableModels: providerRegistry.getAvailableModels(),
+        currentProject: path.basename(workspacePath),
+        version: '0.1.0',
+      })
+    }
+  }, 10_000)
 
   socket.on('connect_error', (err) => {
-    console.error(chalk.red(`Connection error: ${err.message}`))
+    // Quiet warning during background reconnect to avoid cluttering output
+    if (!socket.connected) {
+      process.stdout.write(chalk.dim(`\r[Reconnecting to backend...] `))
+    }
   })
 }
 

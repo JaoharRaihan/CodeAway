@@ -15,9 +15,16 @@ const TaskEventSchema = new Schema<ITaskEvent>({
     type: String,
     enum: [
       'task_started',
+      'agent_thinking',
+      'assistant_message',
+      'assistant_message_chunk',
+      'action_card',
+      'intent_classified',
       'file_read',
       'file_modified',
+      'file_deleted',
       'command_started',
+      'command_output',
       'command_finished',
       'approval_required',
       'error',
@@ -30,5 +37,7 @@ const TaskEventSchema = new Schema<ITaskEvent>({
   metadata: { type: Schema.Types.Mixed },
   created_at: { type: Date, default: Date.now },
 })
+
+TaskEventSchema.index({ task_id: 1, created_at: 1 })
 
 export const TaskEvent = mongoose.model<ITaskEvent>('TaskEvent', TaskEventSchema)

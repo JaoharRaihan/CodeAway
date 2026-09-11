@@ -19,27 +19,114 @@ export class WorkspaceManager {
 
   /**
    * Resolve and validate that a path is strictly inside the allowed workspace.
-   * Prevents path traversal vulnerabilities and prefix collisions.
+   * Prevents path traversal, symlink escapes, and secret/credential file access.
    */
   resolveSafe(filePath: string): string {
     const resolved = path.resolve(this.allowedRoot, filePath)
     const rel = path.relative(this.allowedRoot, resolved)
 
+    // 1. Lexical traversal guard
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
       throw new Error(`🚫 Path "${filePath}" is outside the authorized workspace: ${this.allowedRoot}`)
     }
 
+    // 2. Sensitive credential / secret guard
     if (this.isSensitive(filePath) || this.isSensitive(resolved)) {
-      throw new Error(`🚫 Access to sensitive credential or system file "${filePath}" is blocked`)
+      throw new Error(`🚫 Access to sensitive credential or secret file "${filePath}" is blocked by security policy`)
+    }
+
+    // 3. Symlink / Canonical Realpath Escape Guard
+    try {
+      if (fs.existsSync(resolved)) {
+        const canonicalResolved = fs.realpathSync(resolved)
+        const canonicalRoot = fs.realpathSync(this.allowedRoot)
+        const relCanonical = path.relative(canonicalRoot, canonicalResolved)
+        if (relCanonical.startsWith('..') || path.isAbsolute(relCanonical)) {
+          throw new Error(`🚫 Symlink traversal detected: "${filePath}" points outside the authorized workspace`)
+        }
+        if (this.isSensitive(canonicalResolved)) {
+          throw new Error(`🚫 Symlink target "${filePath}" points to a sensitive credential or secret file`)
+        }
+      } else {
+        // For new files, check nearest existing ancestor directory
+        let parentDir = path.dirname(resolved)
+        while (parentDir && !fs.existsSync(parentDir) && parentDir !== this.allowedRoot) {
+          const parent = path.dirname(parentDir)
+          if (parent === parentDir) break
+          parentDir = parent
+        }
+        if (fs.existsSync(parentDir)) {
+          const canonicalParent = fs.realpathSync(parentDir)
+          const canonicalRoot = fs.realpathSync(this.allowedRoot)
+          const relCanonical = path.relative(canonicalRoot, canonicalParent)
+          if (relCanonical.startsWith('..') || path.isAbsolute(relCanonical)) {
+            throw new Error(`🚫 Parent directory of "${filePath}" escapes authorized workspace via symlink`)
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err.message && err.message.startsWith('🚫')) {
+        throw err
+      }
+      throw new Error(`🚫 Security verification failed for path "${filePath}": ${err.message}`)
     }
 
     return resolved
   }
 
   private isSensitive(p: string): boolean {
-    const base = path.basename(p).toLowerCase()
-    if (base === '.env' || base.startsWith('.env.') || base === 'id_rsa' || base === 'id_ed25519') return true
-    if (p.includes('/.ssh/') || p.includes('/.aws/') || p.includes('/.git/config') || p.includes('/.gnupg/')) return true
+    const normalized = p.replace(/\\/g, '/').toLowerCase()
+    const base = path.basename(normalized)
+
+    // Dotenv variants (e.g. .env, .env.local, atlas-credentials (1).env, prod.env)
+    if (base === '.env' || base.startsWith('.env.') || base.endsWith('.env') || normalized.includes('.env')) {
+      return true
+    }
+
+    // Private keys, certs, and keystores
+    if (
+      base === 'id_rsa' ||
+      base.startsWith('id_rsa.') ||
+      base === 'id_ed25519' ||
+      base.startsWith('id_ed25519.') ||
+      base.endsWith('.pem') ||
+      base.endsWith('.key') ||
+      base.endsWith('.pfx') ||
+      base.endsWith('.pkcs12') ||
+      base.endsWith('.keystore')
+    ) {
+      return true
+    }
+
+    // Sensitive config and secret directories
+    const blockedDirs = [
+      '/.ssh/',
+      '/.aws/',
+      '/.git/config',
+      '/.gnupg/',
+      '/.kube/',
+      '/.docker/',
+      '/.azure/',
+      '/.gcloud/',
+    ]
+    if (blockedDirs.some((dir) => normalized.includes(dir))) {
+      return true
+    }
+
+    // Common token & credential files
+    const sensitiveBases = [
+      'credentials.json',
+      'service-account.json',
+      'client_secret.json',
+      '.netrc',
+      '.npmrc',
+      '.yarnrc',
+      'auth.json',
+    ]
+    if (sensitiveBases.includes(base)) {
+      return true
+    }
+
     return false
   }
 

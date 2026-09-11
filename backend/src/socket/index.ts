@@ -1,6 +1,7 @@
 import { Server } from 'socket.io'
 import { Device } from '../models/Device'
-import { Task } from '../models/Task'
+import { Project } from '../models/Project'
+import { Task, isValidTaskTransition } from '../models/Task'
 import { TaskEvent } from '../models/TaskEvent'
 import { TaskFile } from '../models/TaskFile'
 
@@ -33,7 +34,7 @@ export function initSocket(httpServer: any): Server {
 
     // ── Laptop agent registers itself ─────────────────────────────────────
     socket.on('agent:connect', async (payload: any) => {
-      const { deviceId, availableModels, currentProject, version } = payload
+      const { deviceId, availableModels, currentProject, workspacePath, workspaces, version } = payload
       socket.join(`device:${deviceId}`)
       const update: Record<string, unknown> = {
         status: 'online',
@@ -44,8 +45,33 @@ export function initSocket(httpServer: any): Server {
       if (currentProject) update.current_project = currentProject
       if (version) update.agent_version = version
 
-      await Device.findByIdAndUpdate(deviceId, update)
+      const device = await Device.findByIdAndUpdate(deviceId, update, { new: true })
       console.log(`💻 Agent connected — device: ${deviceId} (${currentProject || 'no project'})`)
+
+      // Auto-register real project workspaces in MongoDB
+      if (device) {
+        const workspaceList: Array<{ name: string; path: string }> = []
+        if (Array.isArray(workspaces) && workspaces.length > 0) {
+          workspaceList.push(...workspaces)
+        } else if (currentProject) {
+          workspaceList.push({ name: currentProject, path: workspacePath || currentProject })
+        }
+
+        for (const ws of workspaceList) {
+          if (ws.name && ws.path) {
+            await Project.findOneAndUpdate(
+              { device_id: deviceId, name: ws.name },
+              {
+                user_id: device.user_id,
+                device_id: deviceId,
+                name: ws.name,
+                path: ws.path,
+              },
+              { upsert: true, new: true }
+            )
+          }
+        }
+      }
     })
 
     // ── Heartbeat ─────────────────────────────────────────────────────────
@@ -62,14 +88,20 @@ export function initSocket(httpServer: any): Server {
     // ── AI progress event from agent → forward to phone ───────────────────
     socket.on('task:event:emit', async ({ taskId, userId, event }) => {
       // Persist
-      await TaskEvent.create({
+      const saved = await TaskEvent.create({
         task_id: taskId,
         event_type: event.type,
         message: event.message,
         metadata: event.metadata,
       })
-      // Broadcast
-      _io!.to(`user:${userId}`).emit('task:event', { taskId, event })
+      // Broadcast with persistent id for client idempotency
+      _io!.to(`user:${userId}`).emit('task:event', {
+        taskId,
+        event: {
+          ...event,
+          id: saved.id as string,
+        },
+      })
     })
 
     // ── Task completed ────────────────────────────────────────────────────
@@ -106,13 +138,67 @@ export function initSocket(httpServer: any): Server {
       })
     })
 
-    // ── Disconnect — mark device offline ─────────────────────────────────
+    // ── Daemon status acknowledgement (confirmed stop, pause, resume) ────
+    socket.on('task:status:ack', async ({ taskId, userId, status, message }) => {
+      const task = await Task.findById(taskId)
+      if (task && isValidTaskTransition(task.status, status)) {
+        await Task.findByIdAndUpdate(taskId, { status })
+        if (message) {
+          const saved = await TaskEvent.create({
+            task_id: taskId,
+            event_type: status === 'stopped' ? 'error' : 'assistant_message',
+            message,
+          })
+          _io!.to(`user:${userId}`).emit('task:status_changed', { taskId, status, message })
+          _io!.to(`user:${userId}`).emit('task:event', {
+            taskId,
+            event: {
+              id: saved.id as string,
+              type: status === 'stopped' ? 'error' : 'assistant_message',
+              message,
+            },
+          })
+        }
+      }
+    })
+
+    // ── Disconnect — mark device offline and fail interrupted tasks ───────
     socket.on('disconnect', async () => {
       console.log(`🔌 Socket disconnected: ${socket.id}`)
-      await Device.findOneAndUpdate(
+      const device = await Device.findOneAndUpdate(
         { socket_id: socket.id },
         { status: 'offline', socket_id: null }
       )
+      if (device) {
+        // Detect tasks that were running on this device and fail them safely
+        const interruptedTasks = await Task.find({
+          device_id: device._id,
+          status: { $in: ['running', 'waiting_approval', 'testing'] },
+        })
+
+        for (const t of interruptedTasks) {
+          t.status = 'failed'
+          t.error = 'Mac agent disconnected while this task was running.'
+          await t.save()
+
+          const eventMsg = '⚠️ Your Mac agent disconnected while this task was running.'
+          const saved = await TaskEvent.create({
+            task_id: t._id,
+            event_type: 'error',
+            message: eventMsg,
+          })
+
+          _io!.to(`user:${t.user_id}`).emit('task:status_changed', {
+            taskId: t.id,
+            status: 'failed',
+            message: eventMsg,
+          })
+          _io!.to(`user:${t.user_id}`).emit('task:event', {
+            taskId: t.id,
+            event: { id: saved.id as string, type: 'error', message: eventMsg },
+          })
+        }
+      }
     })
   })
 

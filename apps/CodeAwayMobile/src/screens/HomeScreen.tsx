@@ -11,7 +11,11 @@ import { connectSocket } from '../services/socket'
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack'
 import type { RootStackParamList } from '../navigation/types'
 
-type Props = { navigation: NativeStackNavigationProp<RootStackParamList, 'Home'> }
+type Props = {
+  navigation: NativeStackNavigationProp<RootStackParamList, any>
+  onSwitchTab?: (tab: any) => void
+  onNewTask?: (params?: { deviceId?: string }) => void
+}
 
 const STATUS_CONFIG: Record<string, { emoji: string; label: string; bg: string; color: string }> = {
   queued: { emoji: '⏳', label: 'Queued', bg: '#1f1e2c', color: '#a09ff5' },
@@ -22,7 +26,7 @@ const STATUS_CONFIG: Record<string, { emoji: string; label: string; bg: string; 
   cancelled: { emoji: '🚫', label: 'Cancelled', bg: '#1e1e28', color: '#9ca3af' },
 }
 
-export default function HomeScreen({ navigation }: Props) {
+export default function HomeScreen({ navigation, onSwitchTab, onNewTask }: Props) {
   const { user, setUser } = useAuthStore()
   const { tasks, setTasks, updateTaskStatus, addLiveEvent } = useTaskStore()
   const [devices, setDevices] = useState<any[]>([])
@@ -76,6 +80,7 @@ export default function HomeScreen({ navigation }: Props) {
 
   const onlineDevices = devices.filter((d) => d.status === 'online')
   const activeTasksCount = tasks.filter((t) => t.status === 'running' || t.status === 'waiting_approval').length
+  const activeTask = tasks.find((t) => t.status === 'running' || t.status === 'waiting_approval')
 
   const getGreeting = () => {
     const hour = new Date().getHours()
@@ -115,23 +120,62 @@ export default function HomeScreen({ navigation }: Props) {
 
         {/* Quick Stats Summary Banner */}
         <View style={styles.bannerCard}>
-          <View style={styles.bannerItem}>
+          <TouchableOpacity
+            style={styles.bannerItem}
+            onPress={() => onSwitchTab && onSwitchTab('devices')}
+            activeOpacity={0.7}
+          >
             <Text style={styles.bannerNumber}>{devices.length}</Text>
             <Text style={styles.bannerLabel}>Connected PCs</Text>
-          </View>
+          </TouchableOpacity>
           <View style={styles.bannerDivider} />
-          <View style={styles.bannerItem}>
+          <TouchableOpacity
+            style={styles.bannerItem}
+            onPress={() => onSwitchTab && onSwitchTab('tasks')}
+            activeOpacity={0.7}
+          >
             <Text style={[styles.bannerNumber, activeTasksCount > 0 && { color: '#818cf8' }]}>
               {activeTasksCount}
             </Text>
             <Text style={styles.bannerLabel}>Active Tasks</Text>
-          </View>
+          </TouchableOpacity>
           <View style={styles.bannerDivider} />
-          <View style={styles.bannerItem}>
+          <TouchableOpacity
+            style={styles.bannerItem}
+            onPress={() => onSwitchTab && onSwitchTab('tasks')}
+            activeOpacity={0.7}
+          >
             <Text style={styles.bannerNumber}>{tasks.length}</Text>
             <Text style={styles.bannerLabel}>Total Tasks</Text>
-          </View>
+          </TouchableOpacity>
         </View>
+
+        {/* Active Task Hero Card */}
+        {activeTask && (
+          <TouchableOpacity
+            style={styles.activeTaskHero}
+            onPress={() => navigation.navigate('TaskDetail', { taskId: activeTask._id })}
+            activeOpacity={0.85}
+          >
+            <View style={styles.activeTaskTop}>
+              <View style={styles.activePill}>
+                <Text style={styles.activePillDot}>🟢</Text>
+                <Text style={styles.activePillText}>
+                  {activeTask.status === 'waiting_approval' ? 'APPROVAL NEEDED' : 'AGENT WORKING'}
+                </Text>
+              </View>
+              <Text style={styles.activeTaskJump}>Live Session →</Text>
+            </View>
+            <Text style={styles.activeTaskPrompt} numberOfLines={2}>
+              {activeTask.prompt}
+            </Text>
+            <Text style={styles.activeTaskSub}>
+              {activeTask.status === 'waiting_approval'
+                ? '⚠️ Waiting for your review in task timeline'
+                : '⚡ Autonomous agent is analyzing code and executing changes...'}
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {/* Computers Section */}
         <View style={styles.sectionHeaderRow}>
@@ -310,6 +354,41 @@ const styles = (StyleSheet as any).create({
     height: 28,
     backgroundColor: '#222232',
   },
+
+  // Active Task Hero Banner
+  activeTaskHero: {
+    backgroundColor: '#16132e',
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#4338ca',
+    shadowColor: '#6c63ff',
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 4,
+    gap: 8,
+  },
+  activeTaskTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  activePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1e1b4b',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    gap: 6,
+  },
+  activePillDot: { fontSize: 10 },
+  activePillText: { fontSize: 11, fontWeight: '800', color: '#a5b4fc', letterSpacing: 0.5 },
+  activeTaskJump: { fontSize: 12, fontWeight: '700', color: '#818cf8' },
+  activeTaskPrompt: { fontSize: 15, fontWeight: '700', color: '#fff', lineHeight: 21 },
+  activeTaskSub: { fontSize: 12, color: '#9ca3af', lineHeight: 16 },
+
 
   // Sections
   sectionHeaderRow: {
