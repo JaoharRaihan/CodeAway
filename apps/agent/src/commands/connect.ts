@@ -36,16 +36,17 @@ export async function connectCommand(opts: { workspace?: string }) {
   const config = getConfig()
 
   // ── 1. Workspace ────────────────────────────────────────────────────────────
-  let workspacePath = opts.workspace ?? config.workspace
-  if (!workspacePath) {
+  let rawWs = opts.workspace ?? config.workspace
+  if (!rawWs) {
     const { ws } = await prompts({
       type: 'text',
       name: 'ws',
       message: 'Which folder should the agent have access to?',
       initial: process.cwd(),
     })
-    workspacePath = path.resolve(ws)
+    rawWs = ws
   }
+  const workspacePath: string = path.resolve(rawWs || process.cwd())
 
   // ── 2. Gemini API key ────────────────────────────────────────────────────────
   let geminiApiKey = config.geminiApiKey

@@ -99,7 +99,7 @@ export function ActionCard({ card }: Props) {
   )
 }
 
-const styles = StyleSheet.create({
+const styles = (StyleSheet as any).create({
   cardContainer: {
     borderRadius: 12,
     borderWidth: 1,
