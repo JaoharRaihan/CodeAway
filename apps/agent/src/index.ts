@@ -26,6 +26,7 @@ program
   .command('connect')
   .description('Register this laptop and start listening for tasks')
   .option('-w, --workspace <path>', 'Path to the allowed workspace folder')
+  .option('-u, --url <url>', 'Backend API URL (e.g. http://localhost:3001 or https://codeaway-backend-fp72.onrender.com)')
   .action(connectCommand)
 
 program

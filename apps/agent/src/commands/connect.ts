@@ -27,7 +27,11 @@ interface PendingApprovalEntry {
 }
 const pendingApprovals = new Map<string, PendingApprovalEntry>()
 
-export async function connectCommand(opts: { workspace?: string }) {
+export async function connectCommand(opts: { workspace?: string; url?: string }) {
+  if (opts.url) {
+    saveConfig({ apiUrl: opts.url })
+  }
+
   if (!isAuthenticated()) {
     console.log(chalk.red('❌ Not logged in. Run `codeaway login` first.'))
     process.exit(1)
